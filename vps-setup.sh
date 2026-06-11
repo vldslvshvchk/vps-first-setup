@@ -4,15 +4,7 @@
 # ================================================
 
 # Проверка на запуск от root
-if [ "$EUID" -ne 0 ]; then
-    echo "❌ Запустите скрипт от root (sudo su - или sudo -i)"
-    exit 1
-fi
-
-set -euo pipefail
-
-# Неинтерактивный режим для apt
-export DEBIAN_FRONTEND=noninteractive
+[[ $EUID -ne 0 ]] && echo -e "${red}Fatal error: ${plain} ❌ Запустите скрипт от root (sudo -i) \n " && exit 1
 
 # ==================== Цвета ====================
 RED='\033[0;31m'
