@@ -10,7 +10,7 @@ plain='\033[0m'
 if [[ $EUID -ne 0 ]]; then
    echo -e "${red}❌ Пожалуйста, запустите этот скрипт с правами root${plain}"
    echo -e "${yellow}💡 Используйте sudo -i${plain}"
-   echo -e "${yellow}🔄 Затем запустите скрипт повторно${plain}"
+   echo -e "${plain}🔄 Затем запустите скрипт повторно${plain}"
    exit 1
 fi
 
