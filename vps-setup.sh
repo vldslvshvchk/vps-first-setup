@@ -333,22 +333,6 @@ else
     sudo apt install crowdsec -y
     sudo apt install crowdsec-firewall-bouncer-iptables -y
     
-    # Включаем и запускаем сервисы
-    systemctl enable --now crowdsec
-    sleep 3
-    
-    # Установка SSH коллекции для CrowdSec
-    if command -v cscli >/dev/null 2>&1; then
-        cscli collections install crowdsecurity/sshd
-        print_success "CrowdSec SSH коллекция установлена"
-    else
-        print_warning "cscli не найден, коллекция SSH не установлена"
-    fi
-    
-    # Установка и запуск firewall bouncer
-    systemctl enable --now crowdsec-firewall-bouncer-iptables
-    
-    systemctl restart crowdsec
     print_success "CrowdSec успешно установлен и настроен"
 fi
 
