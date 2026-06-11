@@ -1,127 +1,141 @@
 #!/bin/bash
-
+# ================================================
 # Скрипт первоначальной настройки Ubuntu сервера
-# Используйте его в два этапа:
-# 1. Запустите первый раз - выполнит обновление и перезагрузку
-# 2. После перезагрузки запустите второй раз - завершит настройку
+# Двухэтапный: обновление → перезагрузка → остальная настройка
+# ================================================
 
-echo "Начинаем первоначальную настройку сервера..."
+set -euo pipefail
 
-# Проверяем, был ли уже выполнен первый этап
-# Используем более постоянное место для маркера
+# Проверка root
+if [ "$EUID" -ne 0 ]; then
+    echo "Запустите скрипт от root (sudo su - или sudo -i)" >&2
+    exit 1
+fi
+
 MARKER_FILE="/etc/first_stage_completed"
 
+echo "=== Начинаем первоначальную настройку Ubuntu сервера ==="
+
+# ====================== ПЕРВЫЙ ЭТАП ======================
 if [ ! -f "$MARKER_FILE" ]; then
-    # 1. Обновляем систему и устанавливаем часовой пояс
-    echo "Обновляем систему и устанавливаем часовой пояс..."
-    sudo timedatectl set-timezone Europe/Moscow
-    sudo apt update && sudo apt upgrade -y
-    
-    # Создаем маркер для отметки выполнения первого этапа
-    sudo touch "$MARKER_FILE"
-    
-    echo "Перезагрузите сервер вручную и запустите скрипт снова."
-    echo "После перезагрузки скрипт продолжит настройку..."
+    echo "=== Этап 1: Обновление системы ==="
+
+    read -rp "Введите таймзону (например Europe/Moscow): " timezone
+    timedatectl set-timezone "$timezone" || echo "⚠️ Не удалось установить таймзону"
+
+    echo "Обновляем систему..."
+    apt-get update && apt-get upgrade -y
+
+    touch "$MARKER_FILE"
+    echo "✅ Первый этап завершён."
+    echo "Перезагрузите сервер командой: reboot"
+    echo "После перезагрузки запустите скрипт снова."
     exit 0
+fi
+
+# ====================== ВТОРОЙ ЭТАП ======================
+echo "=== Этап 2: Основная настройка ==="
+
+# 1. Создание пользователя
+echo "Хотите создать нового пользователя? (y/n)"
+read -r create_user
+
+if [[ "$create_user" =~ ^[Yy]$ ]]; then
+    read -rp "Введите имя нового пользователя: " username
+    if id "$username" >/dev/null 2>&1; then
+        echo "❌ Пользователь $username уже существует!" >&2
+        exit 1
+    fi
+    adduser --quiet --disabled-password --gecos "" "$username"
+    usermod -aG sudo "$username"
+    echo "✅ Пользователь $username создан и добавлен в группу sudo."
 else
-    # Второй этап - после перезагрузки
-    echo "Продолжаем настройку после перезагрузки..."
-    
-    # 2. Поменять пароль на root
-    echo "Установите пароль для root пользователя"
-    sudo passwd root
+    while true; do
+        read -rp "Введите имя существующего пользователя (не root): " username
+        if [ "$username" = "root" ]; then
+            echo "❌ Нельзя использовать root. Попробуйте снова."
+            continue
+        fi
+        if ! id "$username" >/dev/null 2>&1; then
+            echo "❌ Пользователь $username не существует. Попробуйте снова."
+            continue
+        fi
+        break
+    done
+fi
 
-    # 3. Создать пользователя вместо root (опционально)
-    echo "Хотите создать нового пользователя? (y/n):"
-    read create_user
-    if [[ "$create_user" =~ ^[Yy]$ ]]; then
-        echo "Введите имя нового пользователя:"
-        read username
-        sudo adduser $username
-        sudo usermod -aG sudo $username
-    else
-        echo "Пропускаем создание пользователя"
-        username="root"
-    fi
+# 2. Смена пароля root
+echo "Установите новый надёжный пароль для root:"
+passwd root
 
-    # 4. Добавить ключ для подключения по SSH
-    echo "Настройка SSH ключей..."
-    mkdir -p ~/.ssh
-    chmod 700 ~/.ssh
-    touch ~/.ssh/authorized_keys
-    chmod 600 ~/.ssh/authorized_keys
+# 3. Добавление SSH-ключа
+echo "Вставьте ваш публичный SSH ключ (одной строкой):"
+read -r public_key
 
-    echo "Введите ваш публичный SSH ключ (введите ключ и нажмите Enter):"
-    read public_key
-    echo "$public_key" >> ~/.ssh/authorized_keys
+if [ -z "$public_key" ]; then
+    echo "❌ Ключ не введён!" >&2
+    exit 1
+fi
 
-    # 5. Настройка SSH конфигурации
-    echo "Настройка SSH конфигурации..."
-    
-    # Запрашиваем порт для SSH
-    echo "Введите порт для SSH:"
-    echo "Порт или придумываем самостоятельно или выбираем любой понравившийся на https://www.shodan.io/search/facet?query=ssh&facet=port"
-    read ssh_port
-    
-    # Устанавливаем порт в основной конфиг
-    sudo sed -i "/^Port /c\Port $ssh_port" /etc/ssh/sshd_config
-    # Если порт не найден, добавляем строку
-    if ! grep -q "^Port $ssh_port" /etc/ssh/sshd_config; then
-        echo "Port $ssh_port" | sudo tee -a /etc/ssh/sshd_config
-    fi
-    
-    # Устанавливаем остальные настройки в основном конфиге
-    sudo sed -i '/^PermitRootLogin/c\PermitRootLogin no' /etc/ssh/sshd_config
-    sudo sed -i '/^MaxAuthTries/c\MaxAuthTries 3' /etc/ssh/sshd_config
-    sudo sed -i '/^MaxSessions/c\MaxSessions 2' /etc/ssh/sshd_config
-    sudo sed -i '/^PubkeyAuthentication/c\PubkeyAuthentication yes' /etc/ssh/sshd_config
-    sudo sed -i '/^PasswordAuthentication/c\PasswordAuthentication no' /etc/ssh/sshd_config
-    sudo sed -i '/^X11Forwarding/c\X11Forwarding no' /etc/ssh/sshd_config
-    
-    # Проверяем и настраиваем дополнительный конфиг, если он существует
-    if [ -f "/etc/ssh/sshd_config.d/50-cloud-init.conf" ]; then
-        echo "PasswordAuthentication no" | sudo tee -a /etc/ssh/sshd_config.d/50-cloud-init.conf
-    fi
-    
-    # Перезагружаем SSH сервис
-    sudo systemctl daemon-reload
-    sudo systemctl restart ssh.socket
+if [ "$username" != "root" ]; then
+    home="/home/$username"
+    user="$username"
+else
+    home="/root"
+    user="root"
+fi
 
-    # 6. Проверяем установлен ли ufw
-    echo "Устанавливаем UFW..."
-    if ! dpkg -l | grep -q ufw; then
-        sudo apt install ufw -y
-    fi
+mkdir -p "$home/.ssh"
+echo "$public_key" > "$home/.ssh/authorized_keys"
+chown -R "$user:$user" "$home/.ssh"
+chmod 700 "$home/.ssh"
+chmod 600 "$home/.ssh/authorized_keys"
+echo "✅ SSH-ключ установлен для $username"
 
-    # Настраиваем брандмауэр
-    sudo ufw default deny incoming
-    sudo ufw default allow outgoing
-    sudo ufw allow $ssh_port/tcp
-    echo "Если у вас есть статический IP, введите его (или нажмите Enter для пропуска):"
-    read static_ip
-    if [ -n "$static_ip" ]; then
-        sudo ufw allow from $static_ip to any port $ssh_port proto tcp
-    fi
-    sudo ufw enable
+# 4. Настройка SSH
+read -rp "Введите новый порт SSH (1024-65535): " ssh_port
+if ! [[ "$ssh_port" =~ ^[0-9]+$ ]] || [ "$ssh_port" -lt 1024 ] || [ "$ssh_port" -gt 65535 ]; then
+    echo "❌ Некорректный порт!" >&2
+    exit 1
+fi
 
-    # 7. Выбор брандмауэра для защиты от атак (fail2ban или crowdsec)
-    echo "Выберите инструмент для защиты от атак:"
-    echo "1) fail2ban"
-    echo "2) crowdsec"
-    echo "Введите номер (1 или 2):"
-    read choice
+# Надёжная замена параметров
+sed -i 's/^#*Port .*/Port '"$ssh_port"'/' /etc/ssh/sshd_config
+sed -i 's/^#*PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
+sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
+sed -i 's/^#*PubkeyAuthentication.*/PubkeyAuthentication yes/' /etc/ssh/sshd_config
+sed -i 's/^#*MaxAuthTries.*/MaxAuthTries 3/' /etc/ssh/sshd_config
+sed -i 's/^#*MaxSessions.*/MaxSessions 2/' /etc/ssh/sshd_config
+sed -i 's/^#*X11Forwarding.*/X11Forwarding no/' /etc/ssh/sshd_config
 
-    if [[ "$choice" == "1" ]]; then
-        # Установка и настройка fail2ban
-        echo "Устанавливаем fail2ban..."
-        sudo apt install fail2ban -y
-        
-        # Создаём локальный конфиг fail2ban
-        sudo cp /etc/fail2ban/jail.conf /etc/fail2ban/jail.local
-        
-        # Настройка fail2ban для SSH
-        sudo tee -a /etc/fail2ban/jail.local > /dev/null <<EOF
+# Добавляем порт, если sed не сработал
+grep -q "^Port $ssh_port" /etc/ssh/sshd_config || echo "Port $ssh_port" >> /etc/ssh/sshd_config
 
+sshd -t && echo "✅ Конфигурация SSH проверена"
+
+# 5. UFW
+apt-get install ufw -y
+ufw default deny incoming
+ufw default allow outgoing
+ufw allow "$ssh_port"/tcp
+
+read -rp "Ваш статический IP для ограничения SSH (Enter — пропустить): " static_ip
+if [ -n "$static_ip" ]; then
+    ufw allow from "$static_ip" to any port "$ssh_port" proto tcp
+    echo "✅ Доступ по SSH ограничен IP $static_ip"
+fi
+
+ufw --force enable
+
+# 6. Защита от брутфорса
+echo "Выберите инструмент защиты:"
+echo "1) fail2ban"
+echo "2) crowdsec (рекомендуется)"
+read -r choice
+
+if [[ "$choice" == "1" ]]; then
+    apt-get install fail2ban -y
+    cat > /etc/fail2ban/jail.local <<EOF
 [sshd]
 enabled = true
 port = $ssh_port
@@ -132,63 +146,37 @@ bantime = 3600
 findtime = 600
 ignoreip = 127.0.0.1/8 ::1
 EOF
+    systemctl restart fail2ban
+    systemctl enable fail2ban
+    echo "✅ fail2ban установлен и настроен"
 
-        # Перезапуск fail2ban
-        sudo systemctl restart fail2ban
-        sudo systemctl enable fail2ban
-        
-        echo "fail2ban успешно установлен и настроен!"
-        
-    elif [[ "$choice" == "2" ]]; then
-        # Установка Crowdsec (оставляем существующие настройки)
-        echo "Устанавливаем Crowdsec..."
-        curl -s https://install.crowdsec.net | sudo sh
-        sudo apt update
-        sudo apt install crowdsec -y
-        sudo apt install crowdsec-firewall-bouncer-iptables -y
-        
-        echo "Crowdsec успешно установлен!"
-        
-    else
-        echo "Некорректный выбор. Устанавливаем Crowdsec по умолчанию..."
-        curl -s https://install.crowdsec.net | sudo sh
-        sudo apt update
-        sudo apt install crowdsec -y
-        sudo apt install crowdsec-firewall-bouncer-iptables -y
-        echo "Crowdsec успешно установлен!"
-    fi
+else
+    curl -s https://install.crowdsec.net | sh
+    apt-get update
+    apt-get install crowdsec -y
+    apt-get install crowdsec-firewall-bouncer-iptables -y
 
-    # 8. Включаем автоматические обновления безопасности
-    echo "Устанавливаем автоматические обновления..."
-    if ! dpkg -l | grep -q unattended-upgrades; then
-        sudo apt install unattended-upgrades -y
-    fi
+    echo "✅ CrowdSec успешно установлен!"
+    echo "   После перезагрузки настройте его дальше по документации:"
+    echo "   https://docs.crowdsec.net"
+fi
 
-    # Настройка автоматических обновлений
-    sudo tee /etc/apt/apt.conf.d/20auto-upgrades > /dev/null <<EOF
+# 7. Автоматические обновления
+apt-get install unattended-upgrades -y
+cat > /etc/apt/apt.conf.d/20auto-upgrades <<EOF
 APT::Periodic::Update-Package-Lists "1";
 APT::Periodic::Unattended-Upgrade "1";
 EOF
 
-    sudo tee /etc/apt/apt.conf.d/50unattended-upgrades > /dev/null <<EOF
-// Do automatic removal of unused packages after the upgrade  
-// (equivalent to apt-get autoremove)  
+cat > /etc/apt/apt.conf.d/50unattended-upgrades <<EOF
 Unattended-Upgrade::Remove-Unused-Dependencies "true";
-
-// Automatically reboot _WITHOUT CONFIRMATION_ if  
-// the file /var/run/reboot-required is found after the upgrade  
 Unattended-Upgrade::Automatic-Reboot "true";
-
-// If automatic reboot is enabled and needed, reboot at the specific  
-// time instead of immediately  
-// Default: "now"  
 Unattended-Upgrade::Automatic-Reboot-Time "04:00";
 EOF
 
-    # Удаляем маркер после завершения
-    sudo rm -f "$MARKER_FILE"
-    
-    echo "Настройка завершена!"
-    echo "Перезагрузите сервер для применения всех изменений:"
-    echo "sudo reboot"
-fi
+# Завершение
+rm -f "$MARKER_FILE"
+echo "=================================================="
+echo "✅ Настройка сервера успешно завершена!"
+echo "Рекомендуется перезагрузить сервер: reboot"
+echo "=================================================="
