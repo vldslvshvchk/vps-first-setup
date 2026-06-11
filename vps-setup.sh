@@ -1,83 +1,114 @@
 #!/bin/bash
 # ================================================
 # Скрипт первоначальной настройки Ubuntu сервера
-# Двухэтапный: обновление → перезагрузка → остальная настройка
+# Красивый вывод + двухэтапная настройка
 # ================================================
 
 set -euo pipefail
 
+# ==================== Цвета ====================
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+NC='\033[0m'
+
+print_header() {
+    echo -e "\n${BLUE}╔════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${BLUE}║${NC}               $1${NC}"
+    echo -e "${BLUE}╚════════════════════════════════════════════════════════════╝${NC}\n"
+}
+
+print_success() {
+    echo -e "${GREEN}✅ $1${NC}"
+}
+
+print_warning() {
+    echo -e "${YELLOW}⚠️  $1${NC}"
+}
+
+print_error() {
+    echo -e "${RED}❌ $1${NC}" >&2
+}
+
+# Проверка root
 if [ "$EUID" -ne 0 ]; then
-    echo "Запустите скрипт от root (sudo su - или sudo -i)" >&2
+    print_error "Запустите скрипт от root (sudo su - или sudo -i)"
     exit 1
 fi
 
 MARKER_FILE="/etc/first_stage_completed"
 
-echo "=== Начинаем первоначальную настройку Ubuntu сервера ==="
+print_header "НАЧИНАЕМ ПЕРВОНАЧАЛЬНУЮ НАСТРОЙКУ UBUNTU СЕРВЕРА"
 
 # ====================== ПЕРВЫЙ ЭТАП ======================
 if [ ! -f "$MARKER_FILE" ]; then
-    echo "=== Этап 1: Обновление системы ==="
+    print_header "ЭТАП 1 — ОБНОВЛЕНИЕ СИСТЕМЫ"
 
     read -rp "Введите таймзону (по умолчанию Europe/Moscow): " timezone
     if [ -z "$timezone" ]; then
         timezone="Europe/Moscow"
-        echo "✅ Установлена таймзона по умолчанию: $timezone"
+        print_success "Установлена таймзона по умолчанию: $timezone"
     fi
 
-    timedatectl set-timezone "$timezone" || echo "⚠️ Не удалось установить таймзону"
+    timedatectl set-timezone "$timezone" || print_warning "Не удалось установить таймзону"
 
-    echo "Обновляем систему..."
+    echo -e "${CYAN}Обновляем систему...${NC}"
     apt-get update && apt-get upgrade -y
 
     touch "$MARKER_FILE"
-    echo "✅ Первый этап завершён."
-    echo "Перезагрузите сервер: reboot"
-    echo "После перезагрузки запустите скрипт снова."
+    print_success "Первый этап успешно завершён"
+    echo -e "\n${YELLOW}Перезагрузите сервер: reboot${NC}"
+    echo -e "${YELLOW}После перезагрузки запустите скрипт снова.${NC}"
     exit 0
 fi
 
 # ====================== ВТОРОЙ ЭТАП ======================
-echo "=== Этап 2: Основная настройка ==="
+print_header "ЭТАП 2 — ОСНОВНАЯ НАСТРОЙКА"
 
-# 1. Создание пользователя
+# 1. Создание пользователя (интерактивный режим)
+echo -e "${CYAN}Создание пользователя:${NC}"
 echo "Хотите создать нового пользователя? (y/n)"
 read -r create_user
 
 if [[ "$create_user" =~ ^[Yy]$ ]]; then
     read -rp "Введите имя нового пользователя: " username
     if id "$username" >/dev/null 2>&1; then
-        echo "❌ Пользователь $username уже существует!" >&2
+        print_error "Пользователь $username уже существует!"
         exit 1
     fi
-    adduser --gecos "" "$username"
+    echo -e "${CYAN}Создаём пользователя $username (будет запрос пароля и данных)...${NC}"
+    adduser "$username"
     usermod -aG sudo "$username"
-    echo "✅ Пользователь $username создан."
+    print_success "Пользователь $username создан и добавлен в группу sudo"
 else
     while true; do
         read -rp "Введите имя существующего пользователя (не root): " username
         if [ "$username" = "root" ]; then
-            echo "❌ Нельзя использовать root."
+            print_error "Нельзя использовать root"
             continue
         fi
         if ! id "$username" >/dev/null 2>&1; then
-            echo "❌ Пользователь не существует."
+            print_error "Пользователь $username не существует"
             continue
         fi
+        print_success "Используем пользователя: $username"
         break
     done
 fi
 
-# 2. Смена пароля root
-echo "Установите новый пароль для root:"
+# 2. Пароль root
+echo -e "\n${CYAN}Установка пароля root:${NC}"
 passwd root
 
-# 3. SSH-ключ
+# 3. SSH ключ
+echo -e "\n${CYAN}Добавление SSH-ключа:${NC}"
 echo "Вставьте ваш публичный SSH ключ (одной строкой):"
 read -r public_key
 
 if [ -z "$public_key" ]; then
-    echo "❌ Ключ не введён!" >&2
+    print_error "Ключ не введён!"
     exit 1
 fi
 
@@ -94,12 +125,13 @@ echo "$public_key" > "$home/.ssh/authorized_keys"
 chown -R "$user:$user" "$home/.ssh"
 chmod 700 "$home/.ssh"
 chmod 600 "$home/.ssh/authorized_keys"
-echo "✅ SSH-ключ установлен"
+print_success "SSH-ключ успешно установлен"
 
 # 4. Настройка SSH
+echo -e "\n${CYAN}Настройка SSH:${NC}"
 read -rp "Введите новый порт SSH (1024-65535): " ssh_port
 if ! [[ "$ssh_port" =~ ^[0-9]+$ ]] || [ "$ssh_port" -lt 1024 ] || [ "$ssh_port" -gt 65535 ]; then
-    echo "❌ Некорректный порт!" >&2
+    print_error "Некорректный порт!"
     exit 1
 fi
 
@@ -113,24 +145,32 @@ sed -i 's/^#*X11Forwarding.*/X11Forwarding no/' /etc/ssh/sshd_config
 
 grep -q "^Port $ssh_port" /etc/ssh/sshd_config || echo "Port $ssh_port" >> /etc/ssh/sshd_config
 
-sshd -t && echo "✅ SSH конфигурация проверена"
+sshd -t && print_success "Конфигурация SSH проверена (порт $ssh_port)"
 
 # 5. UFW
-apt-get install ufw -y
+echo -e "\n${CYAN}Настройка UFW:${NC}"
+if ! dpkg -l | grep -q "^ii  ufw "; then
+    echo "UFW не найден — устанавливаем..."
+    apt-get install ufw -y
+else
+    print_success "UFW уже установлен"
+fi
+
 ufw default deny incoming
 ufw default allow outgoing
 ufw allow "$ssh_port"/tcp
 
-read -rp "Статический IP для SSH (Enter — пропустить): " static_ip
+read -rp "Статический IP для ограничения SSH (Enter — пропустить): " static_ip
 if [ -n "$static_ip" ]; then
     ufw allow from "$static_ip" to any port "$ssh_port" proto tcp
+    print_success "Доступ по SSH ограничен IP: $static_ip"
 fi
 
 ufw --force enable
-echo "✅ UFW настроен"
+print_success "UFW включён и настроен"
 
-# 6. CrowdSec / fail2ban
-echo "Выберите инструмент защиты:"
+# 6. Защита
+echo -e "\n${CYAN}Выбор системы защиты:${NC}"
 echo "1) fail2ban"
 echo "2) crowdsec (рекомендуется)"
 read -r choice
@@ -150,18 +190,18 @@ ignoreip = 127.0.0.1/8 ::1
 EOF
     systemctl restart fail2ban
     systemctl enable fail2ban
-    echo "✅ fail2ban установлен"
+    print_success "fail2ban установлен и настроен"
 else
-    echo "Устанавливаем CrowdSec..."
+    echo -e "${CYAN}Устанавливаем CrowdSec...${NC}"
     curl -s https://install.crowdsec.net | sh
     apt-get update
     apt-get install crowdsec -y
     apt-get install crowdsec-firewall-bouncer-iptables -y
-    echo "✅ CrowdSec установлен"
+    print_success "CrowdSec успешно установлен"
 fi
 
-# 7. Автоматические обновления (улучшенная версия)
-echo "Настраиваем автоматические обновления..."
+# 7. Автообновления
+echo -e "\n${CYAN}Настройка автоматических обновлений...${NC}"
 apt-get install unattended-upgrades -y
 
 cat > /etc/apt/apt.conf.d/20auto-upgrades <<EOF
@@ -171,19 +211,20 @@ EOF
 
 CONFIG_FILE="/etc/apt/apt.conf.d/50unattended-upgrades"
 
-# Раскомментировать и исправить значения
 sed -i 's|//[[:space:]]*Unattended-Upgrade::Remove-Unused-Dependencies.*|Unattended-Upgrade::Remove-Unused-Dependencies "true";|' "$CONFIG_FILE"
 sed -i 's|//[[:space:]]*Unattended-Upgrade::Automatic-Reboot.*|Unattended-Upgrade::Automatic-Reboot "true";|' "$CONFIG_FILE"
 sed -i 's|//[[:space:]]*Unattended-Upgrade::Automatic-Reboot-Time.*|Unattended-Upgrade::Automatic-Reboot-Time "04:00";|' "$CONFIG_FILE"
 
-# Добавить, если строк нет
 grep -q 'Remove-Unused-Dependencies' "$CONFIG_FILE" || echo 'Unattended-Upgrade::Remove-Unused-Dependencies "true";' >> "$CONFIG_FILE"
 grep -q 'Automatic-Reboot ' "$CONFIG_FILE" || echo 'Unattended-Upgrade::Automatic-Reboot "true";' >> "$CONFIG_FILE"
 grep -q 'Automatic-Reboot-Time' "$CONFIG_FILE" || echo 'Unattended-Upgrade::Automatic-Reboot-Time "04:00";' >> "$CONFIG_FILE"
 
-# Завершение
+print_success "Автоматические обновления настроены"
+
+# ====================== ЗАВЕРШЕНИЕ ======================
 rm -f "$MARKER_FILE"
-echo "=================================================="
-echo "✅ Настройка сервера успешно завершена!"
-echo "Рекомендуется выполнить: reboot"
-echo "=================================================="
+
+print_header "НАСТРОЙКА УСПЕШНО ЗАВЕРШЕНА!"
+echo -e "${GREEN}Сервер готов к работе.${NC}"
+echo -e "${YELLOW}Рекомендуется выполнить перезагрузку:${NC} reboot"
+echo -e "\n${CYAN}Хорошей работы!${NC}"
