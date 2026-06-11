@@ -47,9 +47,16 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
-# Проверка Ubuntu (исправлен regex)
-if [ ! -f /etc/os-release ] || ! grep -qiE '^ID="?ubuntu"?\s*$' /etc/os-release; then
-    print_error "Скрипт протестирован только на Ubuntu 22.04/24.04"
+# Проверка Ubuntu (исправленная проверка)
+if [ ! -f /etc/os-release ]; then
+    print_error "Файл /etc/os-release отсутствует"
+    exit 1
+fi
+
+. /etc/os-release
+
+if [[ "$ID" != "ubuntu" ]]; then
+    print_error "Скрипт протестирован только на Ubuntu"
     exit 1
 fi
 
@@ -102,7 +109,12 @@ if [[ "$create_user" =~ ^[Yy]$ ]]; then
     echo -e "${CYAN}Создаём пользователя $username...${NC}"
     # Используем useradd вместо интерактивного adduser
     useradd -m -s /bin/bash "$username"
-    passwd "$username"
+    
+    # Устанавливаем пароль через chpasswd (без интерактива)
+    read -rsp "Введите пароль для пользователя $username: " password
+    echo
+    echo "$username:$password" | chpasswd
+    
     usermod -aG sudo "$username"
     print_success "Пользователь $username создан и добавлен в группу sudo"
 else
@@ -123,7 +135,10 @@ fi
 
 # 2. Пароль root
 echo -e "\n${CYAN}→ Установка пароля root:${NC}"
-passwd root
+read -rsp "Введите пароль для root: " root_password
+echo
+echo "root:$root_password" | chpasswd
+print_success "Пароль root установлен"
 
 # 3. SSH ключ
 echo -e "\n${CYAN}→ Добавление SSH-ключа:${NC}"
@@ -152,6 +167,7 @@ fi
 mkdir -p "$home/.ssh"
 touch "$home/.ssh/authorized_keys"
 
+# Проверка на существование ключа
 if ! grep -Fxq "$public_key" "$home/.ssh/authorized_keys"; then
     echo "$public_key" >> "$home/.ssh/authorized_keys"
     print_success "SSH-ключ успешно добавлен"
@@ -173,7 +189,11 @@ if ! [[ "$ssh_port" =~ ^[0-9]+$ ]] || [ "$ssh_port" -lt 1024 ] || [ "$ssh_port" 
 fi
 
 # Бэкап конфигурации SSH
-cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak
+if [ ! -f /etc/ssh/sshd_config.bak ]; then
+    cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak
+else
+    print_warning "Бэкап уже существует"
+fi
 
 # Функция для безопасной установки параметров sshd_config
 sshd_cfg_set() {
@@ -203,13 +223,17 @@ sshd_cfg_set X11Forwarding no
 # Проверка конфигурации SSH и перезапуск
 if sshd -t; then
     # Определяем правильное имя сервиса
-    ssh_service=$(systemctl list-unit-files | awk '$1 ~ /^ssh(d)?\.service$/ {print $1; exit}')
-    if [ -n "$ssh_service" ]; then
-        systemctl restart "$ssh_service"
-        print_success "SSH успешно перезапущен"
+    if systemctl is-active --quiet ssh; then
+        ssh_service="ssh"
+    elif systemctl is-active --quiet sshd; then
+        ssh_service="sshd"
     else
-        print_warning "Не удалось определить имя SSH сервиса, попробуйте перезапустить вручную"
+        print_warning "Не удалось определить SSH-сервис, попробуйте перезапустить вручную"
+        exit 1
     fi
+    
+    systemctl restart "$ssh_service"
+    print_success "SSH успешно перезапущен"
 else
     print_error "Ошибка конфигурации SSH"
     print_error "Восстановите бэкап: cp /etc/ssh/sshd_config.bak /etc/ssh/sshd_config"
@@ -270,7 +294,12 @@ EOF
     print_success "fail2ban установлен и настроен"
 else
     echo -e "${CYAN}Устанавливаем CrowdSec...${NC}"
-    curl -fsSL https://install.crowdsec.net | sh
+    
+    # Установка CrowdSec
+    if ! curl -fsSL https://install.crowdsec.net | sh; then
+        print_error "Не удалось установить CrowdSec"
+        exit 1
+    fi
     
     # CrowdSec установщик сам ставит пакеты, просто включаем сервис
     systemctl enable --now crowdsec
