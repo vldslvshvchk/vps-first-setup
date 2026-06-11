@@ -38,25 +38,6 @@
 bash <(curl -fsSL https://raw.githubusercontent.com/vldslvshvchk/vps-first-setup/main/vps-setup.sh)
 ```
 
-## 🔍 Что делает команда
-
-- 📥 Загружает актуальную версию скрипта напрямую из GitHub
-- 🔄 Следует редиректам (`-L`)
-- ❌ Останавливается при HTTP-ошибках (`-f`)
-- 🔇 Скрывает лишний вывод, но показывает ошибки (`-sS`)
-- ⚡ Запускает скрипт без сохранения на диск
-
-## 🛡️ Рекомендуемый способ запуска
-
-Если вы хотите сначала ознакомиться со скриптом:
-
-```bash
-curl -O https://raw.githubusercontent.com/vldslvshvchk/vps-first-setup/main/vps-setup.sh
-chmod +x vps-setup.sh
-nano vps-setup.sh
-./vps-setup.sh
-```
-
 ## ⚠️ Важное замечание
 
 Скрипт выполняет системные изменения и предназначен для новых VPS или серверов, которые только готовятся к эксплуатации.
