@@ -50,7 +50,7 @@ if [[ "$create_user" =~ ^[Yy]$ ]]; then
         echo "❌ Пользователь $username уже существует!" >&2
         exit 1
     fi
-    adduser --quiet --disabled-password --gecos "" "$username"
+    adduser --gecos "" "$username"
     usermod -aG sudo "$username"
     echo "✅ Пользователь $username создан."
 else
