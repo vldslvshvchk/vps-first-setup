@@ -3,6 +3,12 @@
 # Скрипт первоначальной настройки Ubuntu сервера
 # ================================================
 
+# Проверка на запуск от root
+if [ "$EUID" -ne 0 ]; then
+    echo "❌ Запустите скрипт от root (sudo su - или sudo -i)"
+    exit 1
+fi
+
 set -euo pipefail
 
 # Неинтерактивный режим для apt
@@ -40,12 +46,6 @@ print_warning() {
 print_error() {
     echo -e "${RED}❌ $1${NC}" >&2
 }
-
-# Проверка root
-if [ "$EUID" -ne 0 ]; then
-    print_error "Запустите скрипт от root (sudo su - или sudo -i)"
-    exit 1
-fi
 
 # Проверка Ubuntu (исправленная проверка)
 if [ ! -f /etc/os-release ]; then
