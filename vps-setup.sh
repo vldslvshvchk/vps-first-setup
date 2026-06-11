@@ -5,6 +5,9 @@
 
 set -euo pipefail
 
+# Неинтерактивный режим для apt
+export DEBIAN_FRONTEND=noninteractive
+
 # ==================== Цвета ====================
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -14,7 +17,16 @@ CYAN='\033[0;36m'
 NC='\033[0m'
 
 print_header() {
-    echo -e "\n${BLUE}=== $1 ===${NC}\n"
+    local width=60
+    local line
+
+    line=$(printf '%*s' "$width" '' | tr ' ' '=')
+
+    echo
+    echo -e "${BLUE}${line}${NC}"
+    echo -e "${BLUE}$1${NC}"
+    echo -e "${BLUE}${line}${NC}"
+    echo
 }
 
 print_success() {
@@ -35,6 +47,12 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
+# Проверка Ubuntu (исправлен regex)
+if [ ! -f /etc/os-release ] || ! grep -qiE '^ID="?ubuntu"?\s*$' /etc/os-release; then
+    print_error "Скрипт протестирован только на Ubuntu 22.04/24.04"
+    exit 1
+fi
+
 MARKER_FILE="/etc/first_stage_completed"
 
 print_header "НАЧИНАЕМ ПЕРВОНАЧАЛЬНУЮ НАСТРОЙКУ UBUNTU СЕРВЕРА"
@@ -49,7 +67,13 @@ if [ ! -f "$MARKER_FILE" ]; then
         print_success "Установлена таймзона по умолчанию: $timezone"
     fi
 
-    timedatectl set-timezone "$timezone" || print_warning "Не удалось установить таймзону"
+    # Упрощённая проверка таймзоны
+    if ! timedatectl set-timezone "$timezone" 2>/dev/null; then
+        print_warning "Таймзона не найдена, используем Europe/Moscow"
+        timedatectl set-timezone Europe/Moscow
+    else
+        print_success "Таймзона установлена: $timezone"
+    fi
 
     echo -e "${CYAN}Обновляем систему...${NC}"
     apt-get update && apt-get upgrade -y
@@ -76,7 +100,9 @@ if [[ "$create_user" =~ ^[Yy]$ ]]; then
         exit 1
     fi
     echo -e "${CYAN}Создаём пользователя $username...${NC}"
-    adduser "$username"
+    # Используем useradd вместо интерактивного adduser
+    useradd -m -s /bin/bash "$username"
+    passwd "$username"
     usermod -aG sudo "$username"
     print_success "Пользователь $username создан и добавлен в группу sudo"
 else
@@ -102,10 +128,16 @@ passwd root
 # 3. SSH ключ
 echo -e "\n${CYAN}→ Добавление SSH-ключа:${NC}"
 echo "Вставьте ваш публичный SSH ключ (одной строкой):"
-read -r public_key
+IFS= read -r public_key
 
 if [ -z "$public_key" ]; then
     print_error "Ключ не введён!"
+    exit 1
+fi
+
+# Расширенная проверка SSH ключа
+if ! echo "$public_key" | grep -qE '^(ssh-(rsa|ed25519|dss)|ecdsa-sha2-|sk-ssh-)'; then
+    print_error "Некорректный SSH ключ"
     exit 1
 fi
 
@@ -118,11 +150,19 @@ else
 fi
 
 mkdir -p "$home/.ssh"
-echo "$public_key" > "$home/.ssh/authorized_keys"
+touch "$home/.ssh/authorized_keys"
+
+if ! grep -Fxq "$public_key" "$home/.ssh/authorized_keys"; then
+    echo "$public_key" >> "$home/.ssh/authorized_keys"
+    print_success "SSH-ключ успешно добавлен"
+else
+    print_warning "SSH-ключ уже существует в списке"
+fi
+
 chown -R "$user:$user" "$home/.ssh"
 chmod 700 "$home/.ssh"
 chmod 600 "$home/.ssh/authorized_keys"
-print_success "SSH-ключ успешно установлен"
+print_success "SSH-ключи настроены"
 
 # 4. Настройка SSH
 echo -e "\n${CYAN}→ Настройка SSH:${NC}"
@@ -132,19 +172,51 @@ if ! [[ "$ssh_port" =~ ^[0-9]+$ ]] || [ "$ssh_port" -lt 1024 ] || [ "$ssh_port" 
     exit 1
 fi
 
-sed -i 's/^#*Port .*/Port '"$ssh_port"'/' /etc/ssh/sshd_config
-sed -i 's/^#*PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
-sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
-sed -i 's/^#*PubkeyAuthentication.*/PubkeyAuthentication yes/' /etc/ssh/sshd_config
-sed -i 's/^#*MaxAuthTries.*/MaxAuthTries 3/' /etc/ssh/sshd_config
-sed -i 's/^#*MaxSessions.*/MaxSessions 2/' /etc/ssh/sshd_config
-sed -i 's/^#*X11Forwarding.*/X11Forwarding no/' /etc/ssh/sshd_config
+# Бэкап конфигурации SSH
+cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak
 
-grep -q "^Port $ssh_port" /etc/ssh/sshd_config || echo "Port $ssh_port" >> /etc/ssh/sshd_config
+# Функция для безопасной установки параметров sshd_config
+sshd_cfg_set() {
+    local key="$1" val="$2"
+    if grep -qE "^[[:space:]]*#?[[:space:]]*$key[[:space:]]" /etc/ssh/sshd_config; then
+        sed -i "s|^[[:space:]]*#*[[:space:]]*$key[[:space:]].*|$key $val|" /etc/ssh/sshd_config
+    else
+        echo "$key $val" >> /etc/ssh/sshd_config
+    fi
+}
 
-sshd -t && print_success "Конфигурация SSH проверена (порт $ssh_port)"
+# Определяем PermitRootLogin в зависимости от выбранного пользователя
+if [ "$username" = "root" ]; then
+    root_login="prohibit-password"
+else
+    root_login="no"
+fi
 
-# 5. UFW
+sshd_cfg_set Port "$ssh_port"
+sshd_cfg_set PermitRootLogin "$root_login"
+sshd_cfg_set PasswordAuthentication no
+sshd_cfg_set PubkeyAuthentication yes
+sshd_cfg_set MaxAuthTries 3
+sshd_cfg_set MaxSessions 2
+sshd_cfg_set X11Forwarding no
+
+# Проверка конфигурации SSH и перезапуск
+if sshd -t; then
+    # Определяем правильное имя сервиса
+    ssh_service=$(systemctl list-unit-files | awk '$1 ~ /^ssh(d)?\.service$/ {print $1; exit}')
+    if [ -n "$ssh_service" ]; then
+        systemctl restart "$ssh_service"
+        print_success "SSH успешно перезапущен"
+    else
+        print_warning "Не удалось определить имя SSH сервиса, попробуйте перезапустить вручную"
+    fi
+else
+    print_error "Ошибка конфигурации SSH"
+    print_error "Восстановите бэкап: cp /etc/ssh/sshd_config.bak /etc/ssh/sshd_config"
+    exit 1
+fi
+
+# Настройка UFW с правильным ограничением SSH
 echo -e "\n${CYAN}→ Настройка UFW:${NC}"
 if ! dpkg -l | grep -q "^ii  ufw "; then
     echo "UFW не найден — устанавливаем..."
@@ -155,18 +227,26 @@ fi
 
 ufw default deny incoming
 ufw default allow outgoing
-ufw allow "$ssh_port"/tcp
 
 read -rp "Статический IP для ограничения SSH (Enter — пропустить): " static_ip
 if [ -n "$static_ip" ]; then
-    ufw allow from "$static_ip" to any port "$ssh_port" proto tcp
-    print_success "Доступ по SSH ограничен IP: $static_ip"
+    echo -e "${YELLOW}ВНИМАНИЕ: доступ будет разрешён ТОЛЬКО с IP: $static_ip${NC}"
+    read -rp "Вы уверены, что это ваш IP? (y/n): " confirm_ip
+    if [[ "$confirm_ip" =~ ^[Yy]$ ]]; then
+        ufw allow from "$static_ip" to any port "$ssh_port" proto tcp
+        print_success "SSH доступ разрешён только с IP: $static_ip"
+    else
+        print_warning "IP не подтверждён, разрешаем доступ со всех IP"
+        ufw allow "$ssh_port"/tcp
+    fi
+else
+    ufw allow "$ssh_port"/tcp
 fi
 
 ufw --force enable
 print_success "UFW включён и настроен"
 
-# 6. Защита
+# 5. Защита
 echo -e "\n${CYAN}→ Выбор системы защиты:${NC}"
 echo "1) fail2ban"
 echo "2) crowdsec (рекомендуется)"
@@ -190,14 +270,29 @@ EOF
     print_success "fail2ban установлен и настроен"
 else
     echo -e "${CYAN}Устанавливаем CrowdSec...${NC}"
-    curl -s https://install.crowdsec.net | sh
-    apt-get update
-    apt-get install crowdsec -y
+    curl -fsSL https://install.crowdsec.net | sh
+    
+    # CrowdSec установщик сам ставит пакеты, просто включаем сервис
+    systemctl enable --now crowdsec
+    sleep 3
+    
+    # Установка SSH коллекции для CrowdSec
+    if command -v cscli >/dev/null 2>&1; then
+        cscli collections install crowdsecurity/sshd
+        print_success "CrowdSec SSH коллекция установлена"
+    else
+        print_warning "cscli не найден, коллекция SSH не установлена"
+    fi
+    
+    # Установка и запуск firewall bouncer
     apt-get install crowdsec-firewall-bouncer-iptables -y
-    print_success "CrowdSec успешно установлен"
+    systemctl enable --now crowdsec-firewall-bouncer-iptables
+    
+    systemctl restart crowdsec
+    print_success "CrowdSec успешно установлен и настроен"
 fi
 
-# 7. Автообновления
+# 6. Автообновления
 echo -e "\n${CYAN}→ Настройка автоматических обновлений...${NC}"
 apt-get install unattended-upgrades -y
 
@@ -208,13 +303,17 @@ EOF
 
 CONFIG_FILE="/etc/apt/apt.conf.d/50unattended-upgrades"
 
-sed -i 's|//[[:space:]]*Unattended-Upgrade::Remove-Unused-Dependencies.*|Unattended-Upgrade::Remove-Unused-Dependencies "true";|' "$CONFIG_FILE"
-sed -i 's|//[[:space:]]*Unattended-Upgrade::Automatic-Reboot.*|Unattended-Upgrade::Automatic-Reboot "true";|' "$CONFIG_FILE"
-sed -i 's|//[[:space:]]*Unattended-Upgrade::Automatic-Reboot-Time.*|Unattended-Upgrade::Automatic-Reboot-Time "04:00";|' "$CONFIG_FILE"
-
-grep -q 'Remove-Unused-Dependencies' "$CONFIG_FILE" || echo 'Unattended-Upgrade::Remove-Unused-Dependencies "true";' >> "$CONFIG_FILE"
-grep -q 'Automatic-Reboot ' "$CONFIG_FILE" || echo 'Unattended-Upgrade::Automatic-Reboot "true";' >> "$CONFIG_FILE"
-grep -q 'Automatic-Reboot-Time' "$CONFIG_FILE" || echo 'Unattended-Upgrade::Automatic-Reboot-Time "04:00";' >> "$CONFIG_FILE"
+# Исправленная настройка unattended-upgrades
+for directive in \
+    'Unattended-Upgrade::Remove-Unused-Dependencies "true"' \
+    'Unattended-Upgrade::Automatic-Reboot "true"' \
+    'Unattended-Upgrade::Automatic-Reboot-Time "04:00"'; do
+    key="${directive%% *}"
+    # Удаляем старые строки (закомментированные и нет)
+    sed -i "\|^[[:space:]]*//\?[[:space:]]*$key|d" "$CONFIG_FILE"
+    # Добавляем новые
+    echo "$directive;" >> "$CONFIG_FILE"
+done
 
 print_success "Автоматические обновления настроены"
 
