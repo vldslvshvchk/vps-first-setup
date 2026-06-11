@@ -20,7 +20,13 @@ echo "=== Начинаем первоначальную настройку Ubunt
 if [ ! -f "$MARKER_FILE" ]; then
     echo "=== Этап 1: Обновление системы ==="
 
-    read -rp "Введите таймзону (например Europe/Moscow): " timezone
+    # Запрос таймзоны с дефолтом Europe/Moscow
+    read -rp "Введите таймзону (по умолчанию Europe/Moscow): " timezone
+    if [ -z "$timezone" ]; then
+        timezone="Europe/Moscow"
+        echo "✅ Установлена таймзона по умолчанию: $timezone"
+    fi
+
     timedatectl set-timezone "$timezone" || echo "⚠️ Не удалось установить таймзону"
 
     echo "Обновляем систему..."
@@ -108,7 +114,6 @@ sed -i 's/^#*MaxAuthTries.*/MaxAuthTries 3/' /etc/ssh/sshd_config
 sed -i 's/^#*MaxSessions.*/MaxSessions 2/' /etc/ssh/sshd_config
 sed -i 's/^#*X11Forwarding.*/X11Forwarding no/' /etc/ssh/sshd_config
 
-# Добавляем порт, если sed не сработал
 grep -q "^Port $ssh_port" /etc/ssh/sshd_config || echo "Port $ssh_port" >> /etc/ssh/sshd_config
 
 sshd -t && echo "✅ Конфигурация SSH проверена"
@@ -149,16 +154,14 @@ EOF
     systemctl restart fail2ban
     systemctl enable fail2ban
     echo "✅ fail2ban установлен и настроен"
-
 else
+    echo "Устанавливаем CrowdSec по официальному гайду..."
     curl -s https://install.crowdsec.net | sh
     apt-get update
     apt-get install crowdsec -y
     apt-get install crowdsec-firewall-bouncer-iptables -y
-
     echo "✅ CrowdSec успешно установлен!"
-    echo "   После перезагрузки настройте его дальше по документации:"
-    echo "   https://docs.crowdsec.net"
+    echo "   После перезагрузки настройте его дальше: https://docs.crowdsec.net"
 fi
 
 # 7. Автоматические обновления
