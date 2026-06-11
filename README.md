@@ -57,14 +57,6 @@ nano vps-setup.sh
 ./vps-setup.sh
 ```
 
-## 🔄 Обновление
-
-Для запуска последней версии достаточно выполнить:
-
-```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/vldslvshvchk/vps-first-setup/main/vps-setup.sh)
-```
-
 ## ⚠️ Важное замечание
 
 Скрипт выполняет системные изменения и предназначен для новых VPS или серверов, которые только готовятся к эксплуатации.
