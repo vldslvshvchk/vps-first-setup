@@ -6,7 +6,6 @@
 
 set -euo pipefail
 
-# Проверка root
 if [ "$EUID" -ne 0 ]; then
     echo "Запустите скрипт от root (sudo su - или sudo -i)" >&2
     exit 1
@@ -20,7 +19,6 @@ echo "=== Начинаем первоначальную настройку Ubunt
 if [ ! -f "$MARKER_FILE" ]; then
     echo "=== Этап 1: Обновление системы ==="
 
-    # Запрос таймзоны с дефолтом Europe/Moscow
     read -rp "Введите таймзону (по умолчанию Europe/Moscow): " timezone
     if [ -z "$timezone" ]; then
         timezone="Europe/Moscow"
@@ -34,7 +32,7 @@ if [ ! -f "$MARKER_FILE" ]; then
 
     touch "$MARKER_FILE"
     echo "✅ Первый этап завершён."
-    echo "Перезагрузите сервер командой: reboot"
+    echo "Перезагрузите сервер: reboot"
     echo "После перезагрузки запустите скрипт снова."
     exit 0
 fi
@@ -54,16 +52,16 @@ if [[ "$create_user" =~ ^[Yy]$ ]]; then
     fi
     adduser --quiet --disabled-password --gecos "" "$username"
     usermod -aG sudo "$username"
-    echo "✅ Пользователь $username создан и добавлен в группу sudo."
+    echo "✅ Пользователь $username создан."
 else
     while true; do
         read -rp "Введите имя существующего пользователя (не root): " username
         if [ "$username" = "root" ]; then
-            echo "❌ Нельзя использовать root. Попробуйте снова."
+            echo "❌ Нельзя использовать root."
             continue
         fi
         if ! id "$username" >/dev/null 2>&1; then
-            echo "❌ Пользователь $username не существует. Попробуйте снова."
+            echo "❌ Пользователь не существует."
             continue
         fi
         break
@@ -71,10 +69,10 @@ else
 fi
 
 # 2. Смена пароля root
-echo "Установите новый надёжный пароль для root:"
+echo "Установите новый пароль для root:"
 passwd root
 
-# 3. Добавление SSH-ключа
+# 3. SSH-ключ
 echo "Вставьте ваш публичный SSH ключ (одной строкой):"
 read -r public_key
 
@@ -96,7 +94,7 @@ echo "$public_key" > "$home/.ssh/authorized_keys"
 chown -R "$user:$user" "$home/.ssh"
 chmod 700 "$home/.ssh"
 chmod 600 "$home/.ssh/authorized_keys"
-echo "✅ SSH-ключ установлен для $username"
+echo "✅ SSH-ключ установлен"
 
 # 4. Настройка SSH
 read -rp "Введите новый порт SSH (1024-65535): " ssh_port
@@ -105,7 +103,6 @@ if ! [[ "$ssh_port" =~ ^[0-9]+$ ]] || [ "$ssh_port" -lt 1024 ] || [ "$ssh_port" 
     exit 1
 fi
 
-# Надёжная замена параметров
 sed -i 's/^#*Port .*/Port '"$ssh_port"'/' /etc/ssh/sshd_config
 sed -i 's/^#*PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
 sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
@@ -116,7 +113,7 @@ sed -i 's/^#*X11Forwarding.*/X11Forwarding no/' /etc/ssh/sshd_config
 
 grep -q "^Port $ssh_port" /etc/ssh/sshd_config || echo "Port $ssh_port" >> /etc/ssh/sshd_config
 
-sshd -t && echo "✅ Конфигурация SSH проверена"
+sshd -t && echo "✅ SSH конфигурация проверена"
 
 # 5. UFW
 apt-get install ufw -y
@@ -124,15 +121,15 @@ ufw default deny incoming
 ufw default allow outgoing
 ufw allow "$ssh_port"/tcp
 
-read -rp "Ваш статический IP для ограничения SSH (Enter — пропустить): " static_ip
+read -rp "Статический IP для SSH (Enter — пропустить): " static_ip
 if [ -n "$static_ip" ]; then
     ufw allow from "$static_ip" to any port "$ssh_port" proto tcp
-    echo "✅ Доступ по SSH ограничен IP $static_ip"
 fi
 
 ufw --force enable
+echo "✅ UFW настроен"
 
-# 6. Защита от брутфорса
+# 6. CrowdSec / fail2ban
 echo "Выберите инструмент защиты:"
 echo "1) fail2ban"
 echo "2) crowdsec (рекомендуется)"
@@ -153,33 +150,40 @@ ignoreip = 127.0.0.1/8 ::1
 EOF
     systemctl restart fail2ban
     systemctl enable fail2ban
-    echo "✅ fail2ban установлен и настроен"
+    echo "✅ fail2ban установлен"
 else
-    echo "Устанавливаем CrowdSec по официальному гайду..."
+    echo "Устанавливаем CrowdSec..."
     curl -s https://install.crowdsec.net | sh
     apt-get update
     apt-get install crowdsec -y
     apt-get install crowdsec-firewall-bouncer-iptables -y
-    echo "✅ CrowdSec успешно установлен!"
-    echo "   После перезагрузки настройте его дальше: https://docs.crowdsec.net"
+    echo "✅ CrowdSec установлен"
 fi
 
-# 7. Автоматические обновления
+# 7. Автоматические обновления (улучшенная версия)
+echo "Настраиваем автоматические обновления..."
 apt-get install unattended-upgrades -y
+
 cat > /etc/apt/apt.conf.d/20auto-upgrades <<EOF
 APT::Periodic::Update-Package-Lists "1";
 APT::Periodic::Unattended-Upgrade "1";
 EOF
 
-cat > /etc/apt/apt.conf.d/50unattended-upgrades <<EOF
-Unattended-Upgrade::Remove-Unused-Dependencies "true";
-Unattended-Upgrade::Automatic-Reboot "true";
-Unattended-Upgrade::Automatic-Reboot-Time "04:00";
-EOF
+CONFIG_FILE="/etc/apt/apt.conf.d/50unattended-upgrades"
+
+# Раскомментировать и исправить значения
+sed -i 's|//[[:space:]]*Unattended-Upgrade::Remove-Unused-Dependencies.*|Unattended-Upgrade::Remove-Unused-Dependencies "true";|' "$CONFIG_FILE"
+sed -i 's|//[[:space:]]*Unattended-Upgrade::Automatic-Reboot.*|Unattended-Upgrade::Automatic-Reboot "true";|' "$CONFIG_FILE"
+sed -i 's|//[[:space:]]*Unattended-Upgrade::Automatic-Reboot-Time.*|Unattended-Upgrade::Automatic-Reboot-Time "04:00";|' "$CONFIG_FILE"
+
+# Добавить, если строк нет
+grep -q 'Remove-Unused-Dependencies' "$CONFIG_FILE" || echo 'Unattended-Upgrade::Remove-Unused-Dependencies "true";' >> "$CONFIG_FILE"
+grep -q 'Automatic-Reboot ' "$CONFIG_FILE" || echo 'Unattended-Upgrade::Automatic-Reboot "true";' >> "$CONFIG_FILE"
+grep -q 'Automatic-Reboot-Time' "$CONFIG_FILE" || echo 'Unattended-Upgrade::Automatic-Reboot-Time "04:00";' >> "$CONFIG_FILE"
 
 # Завершение
 rm -f "$MARKER_FILE"
 echo "=================================================="
 echo "✅ Настройка сервера успешно завершена!"
-echo "Рекомендуется перезагрузить сервер: reboot"
+echo "Рекомендуется выполнить: reboot"
 echo "=================================================="
