@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Проверка на запуск от root
-[[ $EUID -ne 0 ]] && echo -e "${red}Fatal error: ${plain} ❌ Запустите скрипт от root (sudo -i) \n " && exit 1
+[[ $EUID -ne 0 ]] && echo -e "${red}Фатальная ошибка: ${plain} ❌ Запустите скрипт от root (sudo -i) \n " && exit 1
 
 # ==================== Цвета ====================
 RED='\033[0;31m'
