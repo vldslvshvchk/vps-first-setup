@@ -101,22 +101,32 @@ echo "Хотите создать нового пользователя? (y/n)"
 read -r create_user
 
 if [[ "$create_user" =~ ^[Yy]$ ]]; then
-    read -rp "Введите имя нового пользователя: " username
-    if id "$username" >/dev/null 2>&1; then
-        print_error "Пользователь $username уже существует!"
-        exit 1
-    fi
-    echo -e "${CYAN}Создаём пользователя $username...${NC}"
-    # Используем useradd вместо интерактивного adduser
-    useradd -m -s /bin/bash "$username"
-    
-    # Устанавливаем пароль через chpasswd (без интерактива)
-    read -rsp "Введите пароль для пользователя $username: " password
-    echo
-    echo "$username:$password" | chpasswd
-    
-    usermod -aG sudo "$username"
-    print_success "Пользователь $username создан и добавлен в группу sudo"
+    while true; do
+        read -rp "Введите имя нового пользователя: " username
+        if id "$username" >/dev/null 2>&1; then
+            print_error "Пользователь $username уже существует!"
+            continue
+        fi
+        echo -e "${CYAN}Создаём пользователя $username...${NC}"
+        # Используем useradd вместо интерактивного adduser
+        useradd -m -s /bin/bash "$username"
+        
+        # Устанавливаем пароль через chpasswd (без интерактива)
+        while true; do
+            read -rsp "Введите пароль для пользователя $username: " password
+            echo
+            if [ -z "$password" ]; then
+                print_error "Пароль не может быть пустым!"
+                continue
+            fi
+            break
+        done
+        
+        echo "$username:$password" | chpasswd
+        usermod -aG sudo "$username"
+        print_success "Пользователь $username создан и добавлен в группу sudo"
+        break
+    done
 else
     while true; do
         read -rp "Введите имя существующего пользователя (не root): " username
@@ -135,26 +145,38 @@ fi
 
 # 2. Пароль root
 echo -e "\n${CYAN}→ Установка пароля root:${NC}"
-read -rsp "Введите пароль для root: " root_password
-echo
+while true; do
+    read -rsp "Введите пароль для root: " root_password
+    echo
+    if [ -z "$root_password" ]; then
+        print_error "Пароль не может быть пустым!"
+        continue
+    fi
+    break
+done
+
 echo "root:$root_password" | chpasswd
 print_success "Пароль root установлен"
 
 # 3. SSH ключ
 echo -e "\n${CYAN}→ Добавление SSH-ключа:${NC}"
-echo "Вставьте ваш публичный SSH ключ (одной строкой):"
-IFS= read -r public_key
+while true; do
+    echo "Вставьте ваш публичный SSH ключ (одной строкой):"
+    IFS= read -r public_key
 
-if [ -z "$public_key" ]; then
-    print_error "Ключ не введён!"
-    exit 1
-fi
+    if [ -z "$public_key" ]; then
+        print_error "Ключ не введён!"
+        continue
+    fi
 
-# Расширенная проверка SSH ключа
-if ! echo "$public_key" | grep -qE '^(ssh-(rsa|ed25519|dss)|ecdsa-sha2-|sk-ssh-)'; then
-    print_error "Некорректный SSH ключ"
-    exit 1
-fi
+    # Расширенная проверка SSH ключа
+    if ! echo "$public_key" | grep -qE '^(ssh-(rsa|ed25519|dss)|ecdsa-sha2-|sk-ssh-)'; then
+        print_error "Некорректный SSH ключ"
+        continue
+    fi
+    
+    break
+done
 
 if [ "$username" != "root" ]; then
     home="/home/$username"
@@ -182,11 +204,14 @@ print_success "SSH-ключи настроены"
 
 # 4. Настройка SSH
 echo -e "\n${CYAN}→ Настройка SSH:${NC}"
-read -rp "Введите новый порт SSH (1024-65535): " ssh_port
-if ! [[ "$ssh_port" =~ ^[0-9]+$ ]] || [ "$ssh_port" -lt 1024 ] || [ "$ssh_port" -gt 65535 ]; then
-    print_error "Некорректный порт!"
-    exit 1
-fi
+while true; do
+    read -rp "Введите новый порт SSH (1024-65535): " ssh_port
+    if ! [[ "$ssh_port" =~ ^[0-9]+$ ]] || [ "$ssh_port" -lt 1024 ] || [ "$ssh_port" -gt 65535 ]; then
+        print_error "Некорректный порт!"
+        continue
+    fi
+    break
+done
 
 # Бэкап конфигурации SSH
 if [ ! -f /etc/ssh/sshd_config.bak ]; then
@@ -274,7 +299,14 @@ print_success "UFW включён и настроен"
 echo -e "\n${CYAN}→ Выбор системы защиты:${NC}"
 echo "1) fail2ban"
 echo "2) crowdsec (рекомендуется)"
-read -r choice
+while true; do
+    read -r choice
+    if [[ "$choice" == "1" ]] || [[ "$choice" == "2" ]]; then
+        break
+    else
+        print_error "Введите 1 или 2"
+    fi
+done
 
 if [[ "$choice" == "1" ]]; then
     apt-get install fail2ban -y
@@ -295,13 +327,13 @@ EOF
 else
     echo -e "${CYAN}Устанавливаем CrowdSec...${NC}"
     
-    # Установка CrowdSec
-    if ! curl -fsSL https://install.crowdsec.net | sh; then
-        print_error "Не удалось установить CrowdSec"
-        exit 1
-    fi
+    # Установка CrowdSec по правильной схеме
+    curl -s https://install.crowdsec.net | sudo sh
+    sudo apt update
+    sudo apt install crowdsec -y
+    sudo apt install crowdsec-firewall-bouncer-iptables -y
     
-    # CrowdSec установщик сам ставит пакеты, просто включаем сервис
+    # Включаем и запускаем сервисы
     systemctl enable --now crowdsec
     sleep 3
     
@@ -314,7 +346,6 @@ else
     fi
     
     # Установка и запуск firewall bouncer
-    apt-get install crowdsec-firewall-bouncer-iptables -y
     systemctl enable --now crowdsec-firewall-bouncer-iptables
     
     systemctl restart crowdsec
