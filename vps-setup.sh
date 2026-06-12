@@ -77,15 +77,22 @@ restart_ssh() {
 TIMEZONE=$(timedatectl show -p Timezone --value)
 log_info "Текущая таймзона: $TIMEZONE"
 
-if [[ "$TIMEZONE" == "Europe/Moscow" ]]; then
-    log_ok "Таймзона уже установлена как Europe/Moscow"
+if ask_yn "Хотите изменить таймзону?"; then
+    echo -e "${yellow}Введите таймзону в формате Region/City (например, Europe/Moscow, Asia/Yekaterinburg)${plain}"
+    echo -e "${yellow}Полный список: timedatectl list-timezones${plain}"
+    while true; do
+        read -r -p "Таймзона: " NEW_TIMEZONE
+        if timedatectl list-timezones | grep -qx "$NEW_TIMEZONE"; then
+            timedatectl set-timezone "$NEW_TIMEZONE"
+            log_ok "Таймзона изменена на $NEW_TIMEZONE"
+            break
+        else
+            log_error "Неизвестная таймзона: $NEW_TIMEZONE. Попробуйте снова."
+            log_warn  "Подсказка: timedatectl list-timezones | grep -i <название>"
+        fi
+    done
 else
-    if ask_yn "Хотите установить таймзону Europe/Moscow?"; then
-        timedatectl set-timezone Europe/Moscow
-        log_ok "Таймзона изменена на Europe/Moscow"
-    else
-        log_warn "Таймзона оставлена без изменений"
-    fi
+    log_ok "Таймзона оставлена без изменений: $TIMEZONE"
 fi
 
 # ============================================================
@@ -177,16 +184,17 @@ echo -e "${yellow}  - RSA:     ssh-rsa AAAAB3NzaC1yc2E...${plain}"
 echo -e "${yellow}  - ED25519: ssh-ed25519 AAAAC3NzaC1lZDI1N...${plain}"
 echo -e "${yellow}  - ECDSA:   ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTI...${plain}"
 
+# Валидация через ssh-keygen: записываем ключ во временный файл и проверяем реальную структуру.
+# Это надёжнее regex — ssh-keygen отклонит битый base64, неверную длину и неизвестный тип.
+# Временный файл защищён trap: удалится даже при прерывании скрипта (Ctrl+C и т.п.)
+SSH_KEY_TMP=$(mktemp /tmp/sshkey_validate.XXXXXX)
+trap 'rm -f "$SSH_KEY_TMP"' EXIT
+
 validate_ssh_key() {
     local key="$1"
     [[ -z "$key" ]] && return 1
-    [[ "$key" =~ ^ssh-rsa\ [A-Za-z0-9+/]+={0,2}(\ .*)?$ ]]                     && return 0
-    [[ "$key" =~ ^ssh-ed25519\ [A-Za-z0-9+/]+={0,2}(\ .*)?$ ]]                 && return 0
-    [[ "$key" =~ ^ecdsa-sha2-nistp256\ [A-Za-z0-9+/]+={0,2}(\ .*)?$ ]]         && return 0
-    [[ "$key" =~ ^ecdsa-sha2-nistp384\ [A-Za-z0-9+/]+={0,2}(\ .*)?$ ]]         && return 0
-    [[ "$key" =~ ^ecdsa-sha2-nistp521\ [A-Za-z0-9+/]+={0,2}(\ .*)?$ ]]         && return 0
-    [[ "$key" =~ ^sk-ssh-ed25519@openssh\.com\ [A-Za-z0-9+/]+={0,2}(\ .*)?$ ]] && return 0
-    return 1
+    printf '%s\n' "$key" > "$SSH_KEY_TMP"
+    ssh-keygen -l -f "$SSH_KEY_TMP" &>/dev/null
 }
 
 while true; do
@@ -196,9 +204,21 @@ while true; do
         log_ok "SSH-ключ успешно добавлен для пользователя $username"
         break
     else
-        log_error "Неверный формат SSH-ключа. Попробуйте снова."
+        log_error "Ключ не прошёл проверку ssh-keygen. Убедитесь, что ключ скопирован полностью и без лишних символов."
     fi
 done
+
+rm -f "$SSH_KEY_TMP"
+trap - EXIT  # снимаем trap — временный файл уже удалён
+
+# Проверяем, что authorized_keys читается и содержит валидный ключ
+log_info "Проверка authorized_keys..."
+if ssh-keygen -l -f "/home/$username/.ssh/authorized_keys" &>/dev/null; then
+    log_ok "authorized_keys содержит валидный ключ — проверка пройдена"
+else
+    log_warn "ssh-keygen не смог прочитать ключ из authorized_keys — проверьте файл вручную:"
+    log_warn "  cat /home/$username/.ssh/authorized_keys"
+fi
 
 log_ok "Настройка пользователя завершена"
 
