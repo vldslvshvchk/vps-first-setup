@@ -57,17 +57,14 @@ fi
 # ============================================================
 # Ubuntu 22.04: сервис называется sshd, управляется напрямую
 # Ubuntu 24.04: введён socket-based activation — ssh.socket слушает порт сам,
-#               поэтому при смене порта нужно перезагрузить юниты через daemon-reload
+#               поэтому при смене порта нужно перечитать юниты через daemon-reload
 restart_ssh() {
     log_info "Перезапуск SSH-сервиса..."
     if [[ "$OS_VERSION" == "24.04" ]]; then
-        # Перечитываем юниты (нужно при смене порта в конфиге)
         systemctl daemon-reload
-        # Перезапускаем сокет и сервис
         systemctl restart ssh.socket ssh \
             || die "Ошибка при перезапуске SSH на Ubuntu 24.04"
     else
-        # Ubuntu 22.04
         systemctl restart sshd \
             || die "Ошибка при перезапуске SSH на Ubuntu 22.04"
     fi
@@ -138,11 +135,22 @@ while true; do
     fi
 done
 
+USER_IS_NEW=false
 if id "$username" &>/dev/null; then
     log_warn "Пользователь $username уже существует — пропускаем создание"
 else
     useradd -m -s /bin/bash "$username" || die "Ошибка при создании пользователя $username"
     log_ok "Пользователь $username успешно создан"
+    USER_IS_NEW=true
+fi
+
+# Устанавливаем пароль только для нового пользователя
+if [[ "$USER_IS_NEW" == true ]]; then
+    log_warn "Сейчас будет предложено установить пароль для пользователя $username"
+    while true; do
+        passwd "$username" && { log_ok "Пароль пользователя $username успешно установлен"; break; } \
+            || log_error "Не удалось установить пароль. Попробуем ещё раз."
+    done
 fi
 
 if groups "$username" | grep -q '\bsudo\b'; then
@@ -157,11 +165,11 @@ fi
 # ============================================================
 log_info "Настройка SSH для пользователя $username"
 
-mkdir -p /home/$username/.ssh
-chmod 700 /home/$username/.ssh
-touch /home/$username/.ssh/authorized_keys
-chmod 600 /home/$username/.ssh/authorized_keys
-chown -R "$username":"$username" /home/$username/.ssh
+mkdir -p "/home/$username/.ssh"
+chmod 700 "/home/$username/.ssh"
+touch "/home/$username/.ssh/authorized_keys"
+chmod 600 "/home/$username/.ssh/authorized_keys"
+chown -R "$username":"$username" "/home/$username/.ssh"
 
 log_warn "Введите SSH-ключ для пользователя $username"
 echo -e "${yellow}Поддерживаются форматы:${plain}"
@@ -172,19 +180,19 @@ echo -e "${yellow}  - ECDSA:   ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTI...${plain
 validate_ssh_key() {
     local key="$1"
     [[ -z "$key" ]] && return 1
-    [[ "$key" =~ ^ssh-rsa\ [A-Za-z0-9+/]+={0,2}(\ .*)?$ ]]                      && return 0
-    [[ "$key" =~ ^ssh-ed25519\ [A-Za-z0-9+/]+={0,2}(\ .*)?$ ]]                  && return 0
-    [[ "$key" =~ ^ecdsa-sha2-nistp256\ [A-Za-z0-9+/]+={0,2}(\ .*)?$ ]]          && return 0
-    [[ "$key" =~ ^ecdsa-sha2-nistp384\ [A-Za-z0-9+/]+={0,2}(\ .*)?$ ]]          && return 0
-    [[ "$key" =~ ^ecdsa-sha2-nistp521\ [A-Za-z0-9+/]+={0,2}(\ .*)?$ ]]          && return 0
-    [[ "$key" =~ ^sk-ssh-ed25519@openssh\.com\ [A-Za-z0-9+/]+={0,2}(\ .*)?$ ]]  && return 0
+    [[ "$key" =~ ^ssh-rsa\ [A-Za-z0-9+/]+={0,2}(\ .*)?$ ]]                     && return 0
+    [[ "$key" =~ ^ssh-ed25519\ [A-Za-z0-9+/]+={0,2}(\ .*)?$ ]]                 && return 0
+    [[ "$key" =~ ^ecdsa-sha2-nistp256\ [A-Za-z0-9+/]+={0,2}(\ .*)?$ ]]         && return 0
+    [[ "$key" =~ ^ecdsa-sha2-nistp384\ [A-Za-z0-9+/]+={0,2}(\ .*)?$ ]]         && return 0
+    [[ "$key" =~ ^ecdsa-sha2-nistp521\ [A-Za-z0-9+/]+={0,2}(\ .*)?$ ]]         && return 0
+    [[ "$key" =~ ^sk-ssh-ed25519@openssh\.com\ [A-Za-z0-9+/]+={0,2}(\ .*)?$ ]] && return 0
     return 1
 }
 
 while true; do
     read -r -p "Введите SSH ключ: " ssh_key
     if validate_ssh_key "$ssh_key"; then
-        echo "$ssh_key" >> /home/$username/.ssh/authorized_keys
+        echo "$ssh_key" >> "/home/$username/.ssh/authorized_keys"
         log_ok "SSH-ключ успешно добавлен для пользователя $username"
         break
     else
@@ -265,7 +273,6 @@ log_ok "SSH настроен на порту $NEW_PORT"
 # ============================================================
 log_info "Настройка UFW..."
 
-# Установка если отсутствует
 if ! dpkg-query -W -f='${Status}' ufw 2>/dev/null | grep -q "install ok installed"; then
     apt install ufw -y || die "Ошибка при установке ufw"
     log_ok "UFW установлен"
@@ -273,11 +280,40 @@ else
     log_ok "UFW уже установлен"
 fi
 
-# Базовая политика: запретить все входящие, разрешить все исходящие
-ufw --force reset
+# Сбрасываем правила только если UFW ещё не активен,
+# чтобы не затереть существующие правила при повторном запуске
+if ! ufw status | grep -q "^Status: active"; then
+    ufw --force reset
+    log_info "Правила UFW сброшены (UFW не был активен)"
+fi
+
 ufw default deny incoming
 ufw default allow outgoing
 log_ok "Базовая политика UFW: входящие запрещены, исходящие разрешены"
+
+# Валидация IPv4-адреса или CIDR с проверкой октетов
+validate_ip() {
+    local ip="${1%%/*}"   # убираем маску для проверки октетов
+    local mask="${1#*/}"  # маска (если есть)
+    local has_mask=false
+    [[ "$1" == *"/"* ]] && has_mask=true
+
+    # Проверяем формат четырёх октетов
+    if [[ ! "$ip" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]]; then
+        return 1
+    fi
+    # Проверяем что каждый октет <= 255
+    local IFS='.'
+    read -ra octets <<< "$ip"
+    for octet in "${octets[@]}"; do
+        (( octet > 255 )) && return 1
+    done
+    # Проверяем маску если есть
+    if [[ "$has_mask" == true ]]; then
+        [[ ! "$mask" =~ ^([0-9]|[1-2][0-9]|3[0-2])$ ]] && return 1
+    fi
+    return 0
+}
 
 # Правило для SSH — спрашиваем про белый IP
 log_warn "Если у вас есть статический (белый) IP-адрес, SSH-доступ можно"
@@ -287,15 +323,14 @@ UFW_SSH_MODE="any"
 if ask_yn "Ограничить SSH-доступ только с вашего IP-адреса?"; then
     while true; do
         read -r -p "Введите ваш статический IP-адрес (например, 1.2.3.4 или 1.2.3.0/24): " WHITE_IP
-        # Проверяем формат: IPv4-адрес или CIDR
-        if [[ "$WHITE_IP" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}(/([0-9]|[1-2][0-9]|3[0-2]))?$ ]]; then
+        if validate_ip "$WHITE_IP"; then
             ufw allow from "$WHITE_IP" to any port "$NEW_PORT" proto tcp \
                 || die "Ошибка при добавлении правила UFW для белого IP"
             log_ok "SSH-доступ разрешён только с $WHITE_IP на порт $NEW_PORT/tcp"
             UFW_SSH_MODE="$WHITE_IP"
             break
         else
-            log_error "Неверный формат IP-адреса. Введите корректный IPv4-адрес или CIDR (например, 1.2.3.4 или 1.2.3.0/24)"
+            log_error "Неверный IP-адрес. Введите корректный IPv4 или CIDR (например, 1.2.3.4 или 1.2.3.0/24)"
         fi
     done
 else
@@ -303,7 +338,6 @@ else
     log_ok "SSH-доступ разрешён с любого IP на порт $NEW_PORT/tcp"
 fi
 
-# Включаем UFW
 ufw --force enable || die "Ошибка при включении UFW"
 log_ok "UFW включён"
 
@@ -318,10 +352,14 @@ else
     # Сохраняем установщик во временный файл, чтобы корректно поймать ошибку curl
     # (в конструкции curl | sh код возврата curl теряется)
     CROWDSEC_INSTALLER=$(mktemp)
+    # Удаляем временный файл при любом выходе из скрипта
+    trap 'rm -f "$CROWDSEC_INSTALLER"' EXIT
+
     curl -fsSL https://install.crowdsec.net -o "$CROWDSEC_INSTALLER" \
         || die "Не удалось загрузить установщик CrowdSec"
     sh "$CROWDSEC_INSTALLER" || die "Ошибка при выполнении установщика CrowdSec"
     rm -f "$CROWDSEC_INSTALLER"
+    trap - EXIT  # снимаем trap после успешной установки
 
     apt update
     apt install crowdsec -y || die "Ошибка при установке пакета crowdsec"
@@ -333,7 +371,6 @@ systemctl enable crowdsec --now || die "Не удалось запустить C
 log_ok "Сервис CrowdSec запущен"
 
 # Установка firewall-боунсера (iptables)
-# dpkg-query надёжнее dpkg -l: не обрезает длинные имена пакетов
 if dpkg-query -W -f='${Status}' crowdsec-firewall-bouncer-iptables 2>/dev/null \
         | grep -q "install ok installed"; then
     log_ok "crowdsec-firewall-bouncer-iptables уже установлен — пропускаем"
@@ -368,8 +405,7 @@ EOF
 log_ok "Файл 20auto-upgrades настроен"
 
 # 50unattended-upgrades — правим три параметра через sed
-# Используем точный паттерн окончания строки, чтобы Automatic-Reboot
-# не перекрывался с Automatic-Reboot-Time
+# Используем точный паттерн, чтобы Automatic-Reboot не задевал Automatic-Reboot-Time
 UNATTENDED_CONF="/etc/apt/apt.conf.d/50unattended-upgrades"
 
 # Remove-Unused-Dependencies
@@ -380,7 +416,7 @@ else
     echo 'Unattended-Upgrade::Remove-Unused-Dependencies "true";' >> "$UNATTENDED_CONF"
 fi
 
-# Automatic-Reboot (точный паттерн — без подстроки -Time)
+# Automatic-Reboot (точный паттерн — не задевает Automatic-Reboot-Time)
 if grep -qE 'Unattended-Upgrade::Automatic-Reboot[[:space:]]*"' "$UNATTENDED_CONF"; then
     sed -i -E 's|.*Unattended-Upgrade::Automatic-Reboot[[:space:]]+".*";|Unattended-Upgrade::Automatic-Reboot "true";|' \
         "$UNATTENDED_CONF"
@@ -398,8 +434,10 @@ fi
 
 log_ok "Файл 50unattended-upgrades настроен"
 
-systemctl enable unattended-upgrades --now
-systemctl restart unattended-upgrades || die "Не удалось перезапустить unattended-upgrades"
+systemctl enable unattended-upgrades --now \
+    || die "Не удалось включить unattended-upgrades"
+systemctl restart unattended-upgrades \
+    || die "Не удалось перезапустить unattended-upgrades"
 log_ok "Сервис unattended-upgrades запущен и включён в автозапуск"
 
 # ============================================================
