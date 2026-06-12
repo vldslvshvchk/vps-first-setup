@@ -97,15 +97,16 @@ else
 fi
 
 # Смена пароля root
-echo -e "${yellow}⚠️  Сейчас будет предложено сменить пароль root${plain}"
-passwd root
-
-# Проверка, что пароль был успешно изменён
-if [ $? -eq 0 ]; then
-    echo -e "${green}✅ Пароль root успешно изменён${plain}"
-else
-    echo -e "${red}❌ Не удалось изменить пароль root${plain}"
-fi
+while true; do
+    echo -e "${yellow}⚠️  Сейчас будет предложено сменить пароль root${plain}"
+    passwd root
+    if [ $? -eq 0 ]; then
+        echo -e "${green}✅ Пароль root успешно изменён${plain}"
+        break
+    else
+        echo -e "${red}❌ Не удалось изменить пароль root. Попробуем еще раз.${plain}"
+    fi
+done
 
 # Создание нового пользователя
 echo -e "${blue}🔄 Создание нового пользователя${plain}"
@@ -214,10 +215,10 @@ done
 # Редактирование основного конфига
 TMP_FILE=$(mktemp)
 
-# Обрабатываем основной конфиг построчно
 awk -v new_port="$NEW_PORT" '
 BEGIN {
     port_set = 0;
+    password_auth_set = 0;
 }
 
 /^[[:space:]]*#?[[:space:]]*Port[[:space:]]+/ {
@@ -232,11 +233,20 @@ BEGIN {
 /^[[:space:]]*#?[[:space:]]*MaxAuthTries/ { print "MaxAuthTries 3"; next }
 /^[[:space:]]*#?[[:space:]]*MaxSessions/ { print "MaxSessions 2"; next }
 /^[[:space:]]*#?[[:space:]]*PubkeyAuthentication/ { print "PubkeyAuthentication yes"; next }
-/^[[:space:]]*#?[[:space:]]*PasswordAuthentication/ { print "PasswordAuthentication no"; next }
+
+/^[[:space:]]*#?[[:space:]]*PasswordAuthentication/ {
+    if (!password_auth_set) {
+        print "PasswordAuthentication no";
+        password_auth_set = 1;
+        next;
+    }
+}
+
 /^[[:space:]]*#?[[:space:]]*X11Forwarding/ { print "X11Forwarding no"; next }
 
 { print }
 ' "$MAIN_CONFIG" > "$TMP_FILE" && mv "$TMP_FILE" "$MAIN_CONFIG"
+
 
 # Обработка дополнительных конфигов в директории
 if [ -d "$CONFIG_DIR" ]; then
@@ -245,9 +255,9 @@ if [ -d "$CONFIG_DIR" ]; then
         if [ -f "$config_file" ]; then
             # Проверяем наличие строки PasswordAuthentication в файле
             if grep -Eq "^[[:space:]]*PasswordAuthentication" "$config_file"; then
-                echo "  -> Обнаружена настройка PasswordAuthentication в $config_file. Устанавливаю значение 'no'..."
-                # Используем sed, так как здесь нужно только заменить значение в существующей строке
-                sed -i "s/^[[:space:]]*PasswordAuthentication .*/PasswordAuthentication no/" "$config_file"
+                echo "  -> Обнаружена настройка PasswordAuthentication в $config_file. Устанавливаем значение 'no'..."
+                # Здесь также меняем только первое вхождение в каждом файле
+                sed -i "0,/^[[:space:]]*PasswordAuthentication .*/s//PasswordAuthentication no/" "$config_file"
             else
                 echo "  -> Строка PasswordAuthentication не найдена в $config_file. Пропускаем."
             fi
