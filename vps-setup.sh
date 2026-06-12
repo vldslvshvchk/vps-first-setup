@@ -4,25 +4,20 @@
 #  Вспомогательные функции
 # ============================================================
 
-# Цвета
 red='\033[0;31m'
 green='\033[0;32m'
 blue='\033[0;34m'
 yellow='\033[0;33m'
 plain='\033[0m'
 
-log_info()    { echo -e "${blue}🔄 $*${plain}"; }
-log_ok()      { echo -e "${green}✅ $*${plain}"; }
-log_warn()    { echo -e "${yellow}⚠️  $*${plain}"; }
-log_error()   { echo -e "${red}❌ $*${plain}"; }
+log_info()  { echo -e "${blue}🔄 $*${plain}"; }
+log_ok()    { echo -e "${green}✅ $*${plain}"; }
+log_warn()  { echo -e "${yellow}⚠️  $*${plain}"; }
+log_error() { echo -e "${red}❌ $*${plain}"; }
+die()       { log_error "$*"; exit 1; }
 
-# Завершение с сообщением об ошибке
-die() { log_error "$*"; exit 1; }
-
-# Безопасный запрос yes/no (возвращает 0 при y, 1 при n)
 ask_yn() {
-    local prompt="$1"
-    echo -n "$prompt (y/n): "
+    echo -n "$1 (y/n): "
     read -r -n 1 REPLY
     echo
     [[ $REPLY =~ ^[Yy]$ ]]
@@ -41,9 +36,7 @@ log_ok "Скрипт запущен от root. Продолжаем настро
 # ============================================================
 #  2. Определение операционной системы
 # ============================================================
-if [ ! -f /etc/os-release ]; then
-    die "Не удалось определить ОС. Поддерживаются только Ubuntu 22.04 и 24.04"
-fi
+[ -f /etc/os-release ] || die "Не удалось определить ОС. Поддерживаются только Ubuntu 22.04 и 24.04"
 
 . /etc/os-release
 OS_NAME=$NAME
@@ -56,12 +49,33 @@ elif [[ "$OS_NAME" == *"Debian"* ]]; then
     log_warn "Скрипт тестировался только на Ubuntu и не поддерживает Debian"
     die "Работа скрипта прервана"
 else
-    log_error "Скрипт не поддерживает: $OS_NAME $OS_VERSION"
-    die "Поддерживаются только Ubuntu 22.04 и 24.04"
+    die "Скрипт не поддерживает: $OS_NAME $OS_VERSION. Поддерживаются только Ubuntu 22.04 и 24.04"
 fi
 
 # ============================================================
-#  3. Таймзона
+#  3. Функция перезапуска SSH (зависит от версии Ubuntu)
+# ============================================================
+# Ubuntu 22.04: сервис называется sshd, управляется напрямую
+# Ubuntu 24.04: введён socket-based activation — ssh.socket слушает порт сам,
+#               поэтому при смене порта нужно перезагрузить юниты через daemon-reload
+restart_ssh() {
+    log_info "Перезапуск SSH-сервиса..."
+    if [[ "$OS_VERSION" == "24.04" ]]; then
+        # Перечитываем юниты (нужно при смене порта в конфиге)
+        systemctl daemon-reload
+        # Перезапускаем сокет и сервис
+        systemctl restart ssh.socket ssh \
+            || die "Ошибка при перезапуске SSH на Ubuntu 24.04"
+    else
+        # Ubuntu 22.04
+        systemctl restart sshd \
+            || die "Ошибка при перезапуске SSH на Ubuntu 22.04"
+    fi
+    log_ok "SSH-сервис успешно перезапущен"
+}
+
+# ============================================================
+#  4. Таймзона
 # ============================================================
 TIMEZONE=$(timedatectl show -p Timezone --value)
 log_info "Текущая таймзона: $TIMEZONE"
@@ -78,7 +92,7 @@ else
 fi
 
 # ============================================================
-#  4. Обновление системы
+#  5. Обновление системы
 # ============================================================
 UPDATE_MARKER="/root/.system_updated"
 
@@ -91,7 +105,7 @@ else
     touch "$UPDATE_MARKER"
     log_ok "Система успешно обновлена"
 
-    log_info "Рекомендуется перезагрузка после обновления"
+    log_warn "Рекомендуется перезагрузка после обновления"
     if ask_yn "Перезагрузить систему сейчас?"; then
         log_ok "Перезагрузка системы..."
         reboot
@@ -102,7 +116,7 @@ else
 fi
 
 # ============================================================
-#  5. Смена пароля root
+#  6. Смена пароля root
 # ============================================================
 log_warn "Сейчас будет предложено сменить пароль root"
 while true; do
@@ -111,17 +125,16 @@ while true; do
 done
 
 # ============================================================
-#  6. Создание нового пользователя
+#  7. Создание нового пользователя
 # ============================================================
 log_info "Создание нового пользователя"
 
 while true; do
     read -r -p "Введите имя нового пользователя: " username
-    # Проверяем допустимость имени (только буквы, цифры, дефис, подчёркивание)
     if [[ "$username" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]]; then
         break
     else
-        log_error "Недопустимое имя пользователя. Используйте строчные буквы, цифры, '-' или '_' (не более 32 символов)"
+        log_error "Недопустимое имя. Используйте строчные буквы, цифры, '-' или '_' (не более 32 символов)"
     fi
 done
 
@@ -132,7 +145,6 @@ else
     log_ok "Пользователь $username успешно создан"
 fi
 
-# Добавляем в группу sudo
 if groups "$username" | grep -q '\bsudo\b'; then
     log_ok "Пользователь $username уже в группе sudo"
 else
@@ -141,7 +153,7 @@ else
 fi
 
 # ============================================================
-#  7. Настройка SSH-ключа для нового пользователя
+#  8. Настройка SSH-ключа для нового пользователя
 # ============================================================
 log_info "Настройка SSH для пользователя $username"
 
@@ -160,12 +172,12 @@ echo -e "${yellow}  - ECDSA:   ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTI...${plain
 validate_ssh_key() {
     local key="$1"
     [[ -z "$key" ]] && return 1
-    [[ "$key" =~ ^ssh-rsa\ [A-Za-z0-9+/]+={0,2}(\ .*)?$ ]]          && return 0
-    [[ "$key" =~ ^ssh-ed25519\ [A-Za-z0-9+/]+={0,2}(\ .*)?$ ]]      && return 0
-    [[ "$key" =~ ^ecdsa-sha2-nistp256\ [A-Za-z0-9+/]+={0,2}(\ .*)?$ ]] && return 0
-    [[ "$key" =~ ^ecdsa-sha2-nistp384\ [A-Za-z0-9+/]+={0,2}(\ .*)?$ ]] && return 0
-    [[ "$key" =~ ^ecdsa-sha2-nistp521\ [A-Za-z0-9+/]+={0,2}(\ .*)?$ ]] && return 0
-    [[ "$key" =~ ^sk-ssh-ed25519@openssh\.com\ [A-Za-z0-9+/]+={0,2}(\ .*)?$ ]] && return 0
+    [[ "$key" =~ ^ssh-rsa\ [A-Za-z0-9+/]+={0,2}(\ .*)?$ ]]                      && return 0
+    [[ "$key" =~ ^ssh-ed25519\ [A-Za-z0-9+/]+={0,2}(\ .*)?$ ]]                  && return 0
+    [[ "$key" =~ ^ecdsa-sha2-nistp256\ [A-Za-z0-9+/]+={0,2}(\ .*)?$ ]]          && return 0
+    [[ "$key" =~ ^ecdsa-sha2-nistp384\ [A-Za-z0-9+/]+={0,2}(\ .*)?$ ]]          && return 0
+    [[ "$key" =~ ^ecdsa-sha2-nistp521\ [A-Za-z0-9+/]+={0,2}(\ .*)?$ ]]          && return 0
+    [[ "$key" =~ ^sk-ssh-ed25519@openssh\.com\ [A-Za-z0-9+/]+={0,2}(\ .*)?$ ]]  && return 0
     return 1
 }
 
@@ -183,7 +195,7 @@ done
 log_ok "Настройка пользователя завершена"
 
 # ============================================================
-#  8. Настройка SSH-демона
+#  9. Настройка SSH-демона
 # ============================================================
 MAIN_CONFIG="/etc/ssh/sshd_config"
 CONFIG_DIR="/etc/ssh/sshd_config.d"
@@ -210,7 +222,6 @@ done
 TMP_FILE=$(mktemp)
 awk -v new_port="$NEW_PORT" '
 BEGIN { port_set=0; password_auth_set=0 }
-
 /^[[:space:]]*#?[[:space:]]*Port[[:space:]]+/ {
     if (!port_set) { print "Port", new_port; port_set=1; next }
 }
@@ -246,23 +257,24 @@ log_info "Проверка конфигурации SSH..."
 sshd -t || die "Ошибки в конфигурации SSH. Проверьте $MAIN_CONFIG вручную"
 log_ok "Конфигурация SSH корректна"
 
-systemctl restart sshd || die "Ошибка при перезапуске SSH-сервиса"
-log_ok "SSH-сервис перезапущен на порту $NEW_PORT"
+restart_ssh
+log_ok "SSH настроен на порту $NEW_PORT"
 
 # ============================================================
-#  9. Установка и настройка CrowdSec
+#  10. Установка и настройка CrowdSec
 # ============================================================
 log_info "Установка CrowdSec..."
 
-# Проверяем, не установлен ли уже
 if command -v cscli &>/dev/null; then
     log_ok "CrowdSec уже установлен — пропускаем"
 else
-    # Загружаем и запускаем официальный установщик
-    curl -fsSL https://install.crowdsec.net | sh
-    if [ $? -ne 0 ]; then
-        die "Ошибка при загрузке/выполнении установщика CrowdSec"
-    fi
+    # Сохраняем установщик во временный файл, чтобы корректно поймать ошибку curl
+    # (в конструкции curl | sh код возврата curl теряется)
+    CROWDSEC_INSTALLER=$(mktemp)
+    curl -fsSL https://install.crowdsec.net -o "$CROWDSEC_INSTALLER" \
+        || die "Не удалось загрузить установщик CrowdSec"
+    sh "$CROWDSEC_INSTALLER" || die "Ошибка при выполнении установщика CrowdSec"
+    rm -f "$CROWDSEC_INSTALLER"
 
     apt update
     apt install crowdsec -y || die "Ошибка при установке пакета crowdsec"
@@ -274,7 +286,9 @@ systemctl enable crowdsec --now || die "Не удалось запустить C
 log_ok "Сервис CrowdSec запущен"
 
 # Установка firewall-боунсера (iptables)
-if dpkg -l | grep -q "crowdsec-firewall-bouncer-iptables"; then
+# dpkg-query надёжнее dpkg -l: не обрезает длинные имена пакетов
+if dpkg-query -W -f='${Status}' crowdsec-firewall-bouncer-iptables 2>/dev/null \
+        | grep -q "install ok installed"; then
     log_ok "crowdsec-firewall-bouncer-iptables уже установлен — пропускаем"
 else
     apt install crowdsec-firewall-bouncer-iptables -y \
@@ -282,57 +296,61 @@ else
     log_ok "Firewall-боунсер CrowdSec установлен"
 fi
 
-# Убеждаемся, что боунсер запущен
 systemctl enable crowdsec-firewall-bouncer --now \
     || die "Не удалось запустить crowdsec-firewall-bouncer"
 log_ok "CrowdSec firewall-bouncer запущен"
 
 # ============================================================
-#  10. Автоматические обновления безопасности (unattended-upgrades)
+#  11. Автоматические обновления безопасности (unattended-upgrades)
 # ============================================================
 log_info "Настройка автоматических обновлений безопасности..."
 
-if ! dpkg -l | grep -q "^ii.*unattended-upgrades"; then
+if ! dpkg-query -W -f='${Status}' unattended-upgrades 2>/dev/null \
+        | grep -q "install ok installed"; then
     apt install unattended-upgrades -y || die "Ошибка при установке unattended-upgrades"
     log_ok "unattended-upgrades установлен"
 else
     log_ok "unattended-upgrades уже установлен — пропускаем установку"
 fi
 
-# Записываем 20auto-upgrades программно (без nano)
+# 20auto-upgrades — записываем программно
 cat > /etc/apt/apt.conf.d/20auto-upgrades << 'EOF'
 APT::Periodic::Update-Package-Lists "1";
 APT::Periodic::Unattended-Upgrade "1";
 EOF
 log_ok "Файл 20auto-upgrades настроен"
 
-# Правим параметры в 50unattended-upgrades через sed
+# 50unattended-upgrades — правим три параметра через sed
+# Используем точный паттерн окончания строки, чтобы Automatic-Reboot
+# не перекрывался с Automatic-Reboot-Time
 UNATTENDED_CONF="/etc/apt/apt.conf.d/50unattended-upgrades"
 
 # Remove-Unused-Dependencies
 if grep -q "Unattended-Upgrade::Remove-Unused-Dependencies" "$UNATTENDED_CONF"; then
-    sed -i 's|.*Unattended-Upgrade::Remove-Unused-Dependencies.*|Unattended-Upgrade::Remove-Unused-Dependencies "true";|' "$UNATTENDED_CONF"
+    sed -i 's|.*Unattended-Upgrade::Remove-Unused-Dependencies.*|Unattended-Upgrade::Remove-Unused-Dependencies "true";|' \
+        "$UNATTENDED_CONF"
 else
     echo 'Unattended-Upgrade::Remove-Unused-Dependencies "true";' >> "$UNATTENDED_CONF"
 fi
 
-# Automatic-Reboot
-if grep -q "Unattended-Upgrade::Automatic-Reboot " "$UNATTENDED_CONF"; then
-    sed -i 's|.*Unattended-Upgrade::Automatic-Reboot ".*";|Unattended-Upgrade::Automatic-Reboot "true";|' "$UNATTENDED_CONF"
+# Automatic-Reboot (точный паттерн — без подстроки -Time)
+if grep -qE 'Unattended-Upgrade::Automatic-Reboot[[:space:]]*"' "$UNATTENDED_CONF"; then
+    sed -i -E 's|.*Unattended-Upgrade::Automatic-Reboot[[:space:]]+".*";|Unattended-Upgrade::Automatic-Reboot "true";|' \
+        "$UNATTENDED_CONF"
 else
     echo 'Unattended-Upgrade::Automatic-Reboot "true";' >> "$UNATTENDED_CONF"
 fi
 
 # Automatic-Reboot-Time
 if grep -q "Unattended-Upgrade::Automatic-Reboot-Time" "$UNATTENDED_CONF"; then
-    sed -i 's|.*Unattended-Upgrade::Automatic-Reboot-Time.*|Unattended-Upgrade::Automatic-Reboot-Time "04:00";|' "$UNATTENDED_CONF"
+    sed -i 's|.*Unattended-Upgrade::Automatic-Reboot-Time.*|Unattended-Upgrade::Automatic-Reboot-Time "04:00";|' \
+        "$UNATTENDED_CONF"
 else
     echo 'Unattended-Upgrade::Automatic-Reboot-Time "04:00";' >> "$UNATTENDED_CONF"
 fi
 
 log_ok "Файл 50unattended-upgrades настроен"
 
-# Включаем и перезапускаем сервис
 systemctl enable unattended-upgrades --now
 systemctl restart unattended-upgrades || die "Не удалось перезапустить unattended-upgrades"
 log_ok "Сервис unattended-upgrades запущен и включён в автозапуск"
@@ -342,7 +360,7 @@ log_ok "Сервис unattended-upgrades запущен и включён в а�
 # ============================================================
 echo
 echo -e "${green}========================================"
-echo "  ✅ Настройка сервера завершена!"
+echo -e "  ✅ Настройка сервера завершена!"
 echo -e "========================================${plain}"
 echo
 echo -e "${yellow}📋 Итоговые параметры:${plain}"
