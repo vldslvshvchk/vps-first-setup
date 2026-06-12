@@ -31,7 +31,7 @@
 Выполните одну команду:
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/vldslvshvchk/vps-first-setup/main/vps-setup.sh)
+bash <(curl -Ls https://raw.githubusercontent.com/vldslvshvchk/vps-first-setup/main/vps-setup.sh)
 ```
 
 ## ⚠️ Важное замечание
