@@ -261,7 +261,54 @@ restart_ssh
 log_ok "SSH настроен на порту $NEW_PORT"
 
 # ============================================================
-#  10. Установка и настройка CrowdSec
+#  10. Настройка UFW
+# ============================================================
+log_info "Настройка UFW..."
+
+# Установка если отсутствует
+if ! dpkg-query -W -f='${Status}' ufw 2>/dev/null | grep -q "install ok installed"; then
+    apt install ufw -y || die "Ошибка при установке ufw"
+    log_ok "UFW установлен"
+else
+    log_ok "UFW уже установлен"
+fi
+
+# Базовая политика: запретить все входящие, разрешить все исходящие
+ufw --force reset
+ufw default deny incoming
+ufw default allow outgoing
+log_ok "Базовая политика UFW: входящие запрещены, исходящие разрешены"
+
+# Правило для SSH — спрашиваем про белый IP
+log_warn "Если у вас есть статический (белый) IP-адрес, SSH-доступ можно"
+log_warn "ограничить только им — это значительно повысит безопасность"
+
+UFW_SSH_MODE="any"
+if ask_yn "Ограничить SSH-доступ только с вашего IP-адреса?"; then
+    while true; do
+        read -r -p "Введите ваш статический IP-адрес (например, 1.2.3.4 или 1.2.3.0/24): " WHITE_IP
+        # Проверяем формат: IPv4-адрес или CIDR
+        if [[ "$WHITE_IP" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}(/([0-9]|[1-2][0-9]|3[0-2]))?$ ]]; then
+            ufw allow from "$WHITE_IP" to any port "$NEW_PORT" proto tcp \
+                || die "Ошибка при добавлении правила UFW для белого IP"
+            log_ok "SSH-доступ разрешён только с $WHITE_IP на порт $NEW_PORT/tcp"
+            UFW_SSH_MODE="$WHITE_IP"
+            break
+        else
+            log_error "Неверный формат IP-адреса. Введите корректный IPv4-адрес или CIDR (например, 1.2.3.4 или 1.2.3.0/24)"
+        fi
+    done
+else
+    ufw allow "$NEW_PORT"/tcp || die "Ошибка при добавлении правила UFW для SSH"
+    log_ok "SSH-доступ разрешён с любого IP на порт $NEW_PORT/tcp"
+fi
+
+# Включаем UFW
+ufw --force enable || die "Ошибка при включении UFW"
+log_ok "UFW включён"
+
+# ============================================================
+#  11. Установка и настройка CrowdSec
 # ============================================================
 log_info "Установка CrowdSec..."
 
@@ -301,7 +348,7 @@ systemctl enable crowdsec-firewall-bouncer --now \
 log_ok "CrowdSec firewall-bouncer запущен"
 
 # ============================================================
-#  11. Автоматические обновления безопасности (unattended-upgrades)
+#  12. Автоматические обновления безопасности (unattended-upgrades)
 # ============================================================
 log_info "Настройка автоматических обновлений безопасности..."
 
@@ -365,7 +412,12 @@ echo -e "========================================${plain}"
 echo
 echo -e "${yellow}📋 Итоговые параметры:${plain}"
 echo -e "${blue}  Пользователь:        $username${plain}"
-echo -e "${blue}  SSH порт:            $NEW_PORT${plain}"
+echo -e "${blue}  SSH порт:            $NEW_PORT/tcp${plain}"
+if [[ "$UFW_SSH_MODE" == "any" ]]; then
+    echo -e "${blue}  UFW SSH-доступ:      с любого IP${plain}"
+else
+    echo -e "${blue}  UFW SSH-доступ:      только с $UFW_SSH_MODE${plain}"
+fi
 echo -e "${blue}  CrowdSec:            активен${plain}"
 echo -e "${blue}  Авто-обновления:     включены (перезагрузка в 04:00)${plain}"
 echo
