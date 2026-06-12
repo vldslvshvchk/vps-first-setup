@@ -212,24 +212,44 @@ while true; do
 done
 
 # Редактирование основного конфига
-# Используем ключ 'i' для редактирования файла на месте.
-sed -i "s/^\\s*Port.*/Port $NEW_PORT/" "$MAIN_CONFIG"
-sed -i "s/^\\s*PermitRootLogin .*/PermitRootLogin no/" "$MAIN_CONFIG"
-sed -i "s/^\\s*MaxAuthTries .*/MaxAuthTries 3/" "$MAIN_CONFIG"
-sed -i "s/^\\s*MaxSessions .*/MaxSessions 2/" "$MAIN_CONFIG"
-sed -i "s/^\\s*PubkeyAuthentication .*/PubkeyAuthentication yes/" "$MAIN_CONFIG"
-sed -i "s/^\\s*PasswordAuthentication .*/PasswordAuthentication no/" "$MAIN_CONFIG"
-sed -i "s/^\\s*X11Forwarding .*/X11Forwarding no/" "$MAIN_CONFIG"
+TMP_FILE=$(mktemp)
 
-# Обработка дополнительных конфигов
+# Обрабатываем основной конфиг построчно
+awk -v new_port="$NEW_PORT" '
+BEGIN {
+    port_set = 0;
+}
+
+/^[[:space:]]*#?[[:space:]]*Port[[:space:]]+/ {
+    if (!port_set) {
+        print "Port", new_port;
+        port_set = 1;
+        next;
+    }
+}
+
+/^[[:space:]]*#?[[:space:]]*PermitRootLogin/ { print "PermitRootLogin no"; next }
+/^[[:space:]]*#?[[:space:]]*MaxAuthTries/ { print "MaxAuthTries 3"; next }
+/^[[:space:]]*#?[[:space:]]*MaxSessions/ { print "MaxSessions 2"; next }
+/^[[:space:]]*#?[[:space:]]*PubkeyAuthentication/ { print "PubkeyAuthentication yes"; next }
+/^[[:space:]]*#?[[:space:]]*PasswordAuthentication/ { print "PasswordAuthentication no"; next }
+/^[[:space:]]*#?[[:space:]]*X11Forwarding/ { print "X11Forwarding no"; next }
+
+{ print }
+' "$MAIN_CONFIG" > "$TMP_FILE" && mv "$TMP_FILE" "$MAIN_CONFIG"
+
+# Обработка дополнительных конфигов в директории
 if [ -d "$CONFIG_DIR" ]; then
+    echo "Обработка дополнительных конфигурационных файлов в $CONFIG_DIR..."
     for config_file in "$CONFIG_DIR"/*.conf; do
         if [ -f "$config_file" ]; then
-            if grep -q "^[[:space:]]*PasswordAuthentication" "$config_file"; then
-                echo "Обнаружена настройка PasswordAuthentication в $config_file. Устанавливаю значение 'no'..."
+            # Проверяем наличие строки PasswordAuthentication в файле
+            if grep -Eq "^[[:space:]]*PasswordAuthentication" "$config_file"; then
+                echo "  -> Обнаружена настройка PasswordAuthentication в $config_file. Устанавливаю значение 'no'..."
+                # Используем sed, так как здесь нужно только заменить значение в существующей строке
                 sed -i "s/^[[:space:]]*PasswordAuthentication .*/PasswordAuthentication no/" "$config_file"
             else
-                echo "Строка PasswordAuthentication не найдена в $config_file. Пропускаем."
+                echo "  -> Строка PasswordAuthentication не найдена в $config_file. Пропускаем."
             fi
         fi
     done
