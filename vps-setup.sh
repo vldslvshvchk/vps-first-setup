@@ -96,9 +96,6 @@ else
     fi
 fi
 
-# Информация о повышении безопасности
-echo -e "${blue}🔧 Повышение безопасности системы${plain}"
-
 # Смена пароля root
 echo -e "${yellow}⚠️  Сейчас будет предложено сменить пароль root${plain}"
 passwd root
@@ -109,3 +106,88 @@ if [ $? -eq 0 ]; then
 else
     echo -e "${red}❌ Не удалось изменить пароль root${plain}"
 fi
+
+# Создание нового пользователя
+echo -e "${blue}🔄 Создание нового пользователя${plain}"
+
+# Запрашиваем имя пользователя
+read -p "Введите имя нового пользователя: " username
+
+# Проверяем, существует ли пользователь
+if id "$username" &>/dev/null; then
+    echo -e "${yellow}⚠️  Пользователь $username уже существует${plain}"
+else
+    # Создаем пользователя без интерактивных вопросов
+    useradd "$username"
+    if [ $? -eq 0 ]; then
+        echo -e "${green}✅ Пользователь $username успешно создан${plain}"
+    else
+        echo -e "${red}❌ Ошибка при создании пользователя $username${plain}"
+        exit 1
+    fi
+fi
+
+# Добавляем пользователя в группу sudo если его там нет
+if groups "$username" | grep -q '\bsudo\b'; then
+    echo -e "${green}✅ Пользователь $username уже в группе sudo${plain}"
+else
+    usermod -aG sudo "$username"
+    echo -e "${green}✅ Пользователь $username добавлен в группу sudo${plain}"
+fi
+
+# Настройка SSH для нового пользователя
+echo -e "${blue}🔄 Настройка SSH для пользователя $username${plain}"
+
+# Создание директории .ssh и файлов с правами
+mkdir -p /home/$username/.ssh
+chmod 700 /home/$username/.ssh
+touch /home/$username/.ssh/authorized_keys
+chmod 600 /home/$username/.ssh/authorized_keys
+
+echo -e "${yellow}⚠️  Введите SSH ключ для пользователя $username${plain}"
+echo -e "${yellow}Поддерживаются следующие форматы:${plain}"
+echo -e "${yellow}  - RSA: ssh-rsa AAAAB3NzaC1yc2E...${plain}"
+echo -e "${yellow}  - ED25519: ssh-ed25519 AAAAC3NzaC1lZDI1N...${plain}"
+echo -e "${yellow}  - ECDSA: ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTI...${plain}"
+
+# Функция для проверки валидности SSH ключа
+validate_ssh_key() {
+    local key="$1"
+
+    # Проверяем, что строка не пустая
+    if [[ -z "$key" ]]; then
+        return 1
+    fi
+
+    # Проверяем форматы ключей
+    if [[ "$key" =~ ^ssh-rsa\ [A-Za-z0-9+/]+={0,2}\ (.*)?$ ]] || \
+       [[ "$key" =~ ^ssh-ed25519\ [A-Za-z0-9+/]+={0,2}\ (.*)?$ ]] || \
+       [[ "$key" =~ ^ecdsa-sha2-nistp256\ [A-Za-z0-9+/]+={0,2}\ (.*)?$ ]] || \
+       [[ "$key" =~ ^ecdsa-sha2-nistp384\ [A-Za-z0-9+/]+={0,2}\ (.*)?$ ]] || \
+       [[ "$key" =~ ^ecdsa-sha2-nistp521\ [A-Za-z0-9+/]+={0,2}\ (.*)?$ ]] || \
+       [[ "$key" =~ ^sk-ssh-ed25519@openssh.com\ [A-Za-z0-9+/]+={0,2}\ (.*)?$ ]]; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+# Запрашиваем SSH ключ с повторным вводом при ошибке
+while true; do
+    read -p "Введите SSH ключ: " ssh_key
+
+    if validate_ssh_key "$ssh_key"; then
+        echo "$ssh_key" >> /home/$username/.ssh/authorized_keys
+        echo -e "${green}✅ SSH ключ успешно добавлен для пользователя $username${plain}"
+        break
+    else
+        echo -e "${red}❌ Неверный формат SSH ключа${plain}"
+        echo -e "${yellow}Пожалуйста, убедитесь, что ввели корректный SSH ключ${plain}"
+        echo -e "${yellow}Поддерживаются следующие форматы:${plain}"
+        echo -e "${yellow}  - RSA: ssh-rsa AAAAB3NzaC1yc2E...${plain}"
+        echo -e "${yellow}  - ED25519: ssh-ed25519 AAAAC3NzaC1lZDI1N...${plain}"
+        echo -e "${yellow}  - ECDSA: ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTI...${plain}"
+    fi
+done
+
+echo -e "${green}✅ Настройка пользователя завершена${plain}"
