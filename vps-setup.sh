@@ -191,3 +191,49 @@ while true; do
 done
 
 echo -e "${green}✅ Настройка пользователя завершена${plain}"
+
+# Настройка SSH
+MAIN_CONFIG="/etc/ssh/sshd_config"
+CONFIG_DIR="/etc/ssh/sshd_config.d/"
+
+    # Запрос порта с проверкой (диапазон 1024-65535)
+echo -e "${yellow}⚠️  Сейчас будет предложено сменить SSH порт${plain}"
+echo -e "${yellow}Выбрать порт можно на сайте https://www.shodan.io/search/facet?query=ssh&facet=port${plain}"
+while true; do
+    read -p "Введите номер порта SSH (рекомендуется диапазон от 1024 до 65535): " NEW_PORT
+
+    # Проверка, что ввод состоит только из цифр и находится в допустимом диапазоне
+    if [[ "$NEW_PORT" =~ ^[0-9]+$ ]] && [ "$NEW_PORT" -ge 1024 ] && [ "$NEW_PORT" -le 65535 ]; then
+        echo "Устанавливаю порт $NEW_PORT..."
+        break
+    else
+        echo "Ошибка: Неверный номер порта. Пожалуйста, введите число от 1024 до 65535."
+    fi
+done
+
+# Редактирование основного конфига
+# Используем ключ 'i' для редактирования файла на месте.
+sed -i "s/^\\s*Port.*/Port $NEW_PORT/" "$MAIN_CONFIG"
+sed -i "s/^\\s*PermitRootLogin .*/PermitRootLogin no/" "$MAIN_CONFIG"
+sed -i "s/^\\s*MaxAuthTries .*/MaxAuthTries 3/" "$MAIN_CONFIG"
+sed -i "s/^\\s*MaxSessions .*/MaxSessions 2/" "$MAIN_CONFIG"
+sed -i "s/^\\s*PubkeyAuthentication .*/PubkeyAuthentication yes/" "$MAIN_CONFIG"
+sed -i "s/^\\s*PasswordAuthentication .*/PasswordAuthentication no/" "$MAIN_CONFIG"
+sed -i "s/^\\s*X11Forwarding .*/X11Forwarding no/" "$MAIN_CONFIG"
+
+# Обработка дополнительных конфигов
+if [ -d "$CONFIG_DIR" ]; then
+    for config_file in "$CONFIG_DIR"/*.conf; do
+        if [ -f "$config_file" ]; then
+            if grep -q "^[[:space:]]*PasswordAuthentication" "$config_file"; then
+                echo "Обнаружена настройка PasswordAuthentication в $config_file. Устанавливаю значение 'no'..."
+                sed -i "s/^[[:space:]]*PasswordAuthentication .*/PasswordAuthentication no/" "$config_file"
+            else
+                echo "Строка PasswordAuthentication не найдена в $config_file. Пропускаем."
+            fi
+        fi
+    done
+else
+    echo "Директория $CONFIG_DIR не существует. Пропускаем обработку доп. конфигов."
+fi
+echo -e "${green}✅ Настройка SSH завершена${plain}"
