@@ -7,7 +7,7 @@ blue='\033[0;34m'
 yellow='\033[0;33m'
 plain='\033[0m'
 
-# check root
+# Проверка запуска из под root
 if [[ $EUID -ne 0 ]]; then
    echo -e "${red}❌ Пожалуйста, запустите этот скрипт с правами root${plain}"
    echo -e "${yellow}💡 Используйте sudo -i${plain}"
@@ -62,4 +62,50 @@ else
     else
         echo -e "${yellow}🔄 Таймзона оставлена без изменений${plain}"
     fi
+fi
+
+# Проверка наличия маркера обновления
+UPDATE_MARKER="/root/.system_updated"
+
+if [ -f "$UPDATE_MARKER" ]; then
+    echo -e "${green}✅ Система уже была обновлена ранее${plain}"
+else
+    echo -e "${blue}🔄 Начинаем обновление системы...${plain}"
+    
+    # Обновление пакетов
+    apt update && apt upgrade -y
+    
+    if [ $? -eq 0 ]; then
+        echo -e "${green}✅ Система успешно обновлена${plain}"
+        
+        # Создание маркера для пропуска шага при повторном запуске
+        touch "$UPDATE_MARKER"
+        
+        echo -e "${blue}🔄 Требуется перезагрузка системы${plain}"
+        read -p "Хотите перезагрузить систему сейчас? (y/n): " -n 1 -r
+        echo
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+            echo -e "${green}✅ Перезагрузка системы...${plain}"
+            reboot
+        else
+            echo -e "${yellow}🔄 Перезагрузка отложена. Пожалуйста, перезагрузите систему вручную${plain}"
+        fi
+    else
+        echo -e "${red}❌ Ошибка при обновлении системы${plain}"
+        exit 1
+    fi
+fi
+
+# Информация о повышении безопасности
+echo -e "${blue}🔧 Повышение безопасности системы${plain}"
+
+# Смена пароля root
+echo -e "${yellow}⚠️  Сейчас будет предложено сменить пароль root${plain}"
+passwd root
+
+# Проверка, что пароль был успешно изменён
+if [ $? -eq 0 ]; then
+    echo -e "${green}✅ Пароль root успешно изменён${plain}"
+else
+    echo -e "${red}❌ Не удалось изменить пароль root${plain}"
 fi
