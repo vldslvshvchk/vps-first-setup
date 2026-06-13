@@ -343,7 +343,9 @@ END {
 }
 ' "$MAIN_CONFIG" > "$TMP_FILE" && mv "$TMP_FILE" "$MAIN_CONFIG"
 # После mv файл перемещён, удалять нечего — убираем из очереди
-_TMPFILES=("${_TMPFILES[@]/$TMP_FILE}")
+for i in "${!_TMPFILES[@]}"; do
+    [[ "${_TMPFILES[$i]}" == "$TMP_FILE" ]] && unset '_TMPFILES[i]'
+done
 
 if [ -d "$CONFIG_DIR" ]; then
     log_info "Обработка дополнительных конфигов в $CONFIG_DIR..."
