@@ -459,7 +459,7 @@ MAIN_CONFIG_BACKUP="${MAIN_CONFIG}.backup.$(date +%Y%m%d_%H%M%S)"
 CURRENT_SSH_PORT=$(ss -tlnH "( sport = :22 )" | grep -q . && echo "22" \
     || grep -E "^Port " "$MAIN_CONFIG" 2>/dev/null | awk '{print $2}' || echo "неизвестен")
 log_step "Текущий SSH-порт: ${bold}$CURRENT_SSH_PORT${plain}"
-log_step "Подобрать незанятый порт: https://www.shodan.io/search/facet?query=ssh&facet=port"
+log_step "Подобрать порт: https://www.shodan.io/search/facet?query=ssh&facet=port"
 
 NEW_PORT=''
 while true; do
