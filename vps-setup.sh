@@ -459,7 +459,7 @@ MAIN_CONFIG_BACKUP="${MAIN_CONFIG}.backup.$(date +%Y%m%d_%H%M%S)"
 CURRENT_SSH_PORT=$(ss -tlnH "( sport = :22 )" | grep -q . && echo "22" \
     || grep -E "^Port " "$MAIN_CONFIG" 2>/dev/null | awk '{print $2}' || echo "неизвестен")
 log_step "Текущий SSH-порт: ${bold}$CURRENT_SSH_PORT${plain}"
-log_step "Подобрать порт: https://www.shodan.io/search/facet?query=ssh&facet=port"
+log_step "Подобрать незанятый порт: https://www.shodan.io/search/facet?query=ssh&facet=port"
 
 NEW_PORT=''
 while true; do
@@ -727,60 +727,77 @@ fi
 # ============================================================
 section "Установка CrowdSec"
 
+CROWDSEC_ACTIVE=false
+
+log_info "CrowdSec — система обнаружения и блокировки атак (бан-агент + firewall-боунсер)"
 if command -v cscli &>/dev/null; then
-    log_ok "CrowdSec уже установлен — пропускаем"
+    log_ok "CrowdSec уже установлен — пропускаем установку"
+    INSTALL_CROWDSEC=true
+elif ask_yn "Установить CrowdSec?"; then
+    INSTALL_CROWDSEC=true
 else
-    check_internet
+    INSTALL_CROWDSEC=false
+    log_warn "Установка CrowdSec пропущена по выбору пользователя"
+fi
 
-    # Скачиваем во временный файл — в curl | sh код возврата curl
-    # теряется даже при pipefail если sh завершился успешно
-    CROWDSEC_INSTALLER=$(mktemp)
-    _TMPFILES+=("$CROWDSEC_INSTALLER")
+if [[ "$INSTALL_CROWDSEC" == true ]]; then
+    if command -v cscli &>/dev/null; then
+        log_ok "CrowdSec уже установлен — пропускаем"
+    else
+        check_internet
 
-    log_info "Загрузка установщика CrowdSec..."
-    curl -fsSL https://install.crowdsec.net -o "$CROWDSEC_INSTALLER" || die \
-        "Не удалось загрузить установщик CrowdSec" \
-        "  Проверьте интернет: ping 8.8.8.8
+        # Скачиваем во временный файл — в curl | sh код возврата curl
+        # теряется даже при pipefail если sh завершился успешно
+        CROWDSEC_INSTALLER=$(mktemp)
+        _TMPFILES+=("$CROWDSEC_INSTALLER")
+
+        log_info "Загрузка установщика CrowdSec..."
+        curl -fsSL https://install.crowdsec.net -o "$CROWDSEC_INSTALLER" || die \
+            "Не удалось загрузить установщик CrowdSec" \
+            "  Проверьте интернет: ping 8.8.8.8
   Или установите вручную: https://docs.crowdsec.net/docs/getting_started/install_crowdsec/"
 
-    log_info "Запуск установщика CrowdSec..."
-    sh "$CROWDSEC_INSTALLER" || die \
-        "Ошибка установщика CrowdSec" \
-        "  Попробуйте установить вручную:
+        log_info "Запуск установщика CrowdSec..."
+        sh "$CROWDSEC_INSTALLER" || die \
+            "Ошибка установщика CrowdSec" \
+            "  Попробуйте установить вручную:
   curl -s https://packagecloud.io/install/repositories/crowdsec/crowdsec/script.deb.sh | bash
   apt-get install crowdsec"
 
-    log_info "Установка пакета crowdsec..."
-    apt-get update -q || die "Ошибка apt-get update" "  apt-get update"
-    apt-get install -y -q crowdsec || die \
-        "Ошибка при установке crowdsec" \
-        "  apt-get install -f
+        log_info "Установка пакета crowdsec..."
+        apt-get update -q || die "Ошибка apt-get update" "  apt-get update"
+        apt-get install -y -q crowdsec || die \
+            "Ошибка при установке crowdsec" \
+            "  apt-get install -f
   dpkg --configure -a
   apt-get install -y crowdsec"
-    log_ok "CrowdSec установлен"
-fi
+        log_ok "CrowdSec установлен"
+    fi
 
-# Запускаем до установки боунсера — боунсер регистрируется через LAPI
-systemctl enable crowdsec --now || die \
-    "Не удалось запустить CrowdSec" \
-    "  journalctl -u crowdsec --no-pager -n 30
+    # Запускаем до установки боунсера — боунсер регистрируется через LAPI
+    systemctl enable crowdsec --now || die \
+        "Не удалось запустить CrowdSec" \
+        "  journalctl -u crowdsec --no-pager -n 30
   systemctl status crowdsec"
-log_ok "Сервис CrowdSec запущен"
+    log_ok "Сервис CrowdSec запущен"
 
-if pkg_installed crowdsec-firewall-bouncer-iptables; then
-    log_ok "crowdsec-firewall-bouncer-iptables уже установлен — пропускаем"
-else
-    log_info "Установка firewall-боунсера..."
-    apt-get install -y -q crowdsec-firewall-bouncer-iptables || die \
-        "Ошибка при установке crowdsec-firewall-bouncer-iptables" \
-        "  apt-get install -y crowdsec-firewall-bouncer-iptables"
-    log_ok "Firewall-боунсер установлен"
+    if pkg_installed crowdsec-firewall-bouncer-iptables; then
+        log_ok "crowdsec-firewall-bouncer-iptables уже установлен — пропускаем"
+    else
+        log_info "Установка firewall-боунсера..."
+        apt-get install -y -q crowdsec-firewall-bouncer-iptables || die \
+            "Ошибка при установке crowdsec-firewall-bouncer-iptables" \
+            "  apt-get install -y crowdsec-firewall-bouncer-iptables"
+        log_ok "Firewall-боунсер установлен"
+    fi
+
+    systemctl enable crowdsec-firewall-bouncer --now || die \
+        "Не удалось запустить crowdsec-firewall-bouncer" \
+        "  journalctl -u crowdsec-firewall-bouncer --no-pager -n 30"
+    log_ok "CrowdSec firewall-bouncer запущен"
+
+    CROWDSEC_ACTIVE=true
 fi
-
-systemctl enable crowdsec-firewall-bouncer --now || die \
-    "Не удалось запустить crowdsec-firewall-bouncer" \
-    "  journalctl -u crowdsec-firewall-bouncer --no-pager -n 30"
-log_ok "CrowdSec firewall-bouncer запущен"
 
 # ============================================================
 #  13. Автообновления (unattended-upgrades)
@@ -918,7 +935,11 @@ if [[ "$SWAP_ACTIVE" == true ]]; then
 else
     echo -e "${blue}     Swap:               не настроен${plain}"
 fi
-echo -e "${blue}     CrowdSec:           активен${plain}"
+if [[ "$CROWDSEC_ACTIVE" == true ]]; then
+    echo -e "${blue}     CrowdSec:           активен${plain}"
+else
+    echo -e "${blue}     CrowdSec:           не установлен${plain}"
+fi
 echo -e "${blue}     Авто-обновления:    включены (перезагрузка в 04:00)${plain}"
 if [[ "$NOPASSWD_ACTIVE" == true ]]; then
     echo -e "${blue}     sudo без пароля:   ${bold}включено${plain}"
