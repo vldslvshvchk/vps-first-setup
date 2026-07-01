@@ -1,7 +1,7 @@
 #!/bin/bash
 # ==============================================================================
 #  Настройка Ubuntu-сервера после первичного развёртывания
-#  Поддерживаемые ОС: Ubuntu 22.04, Ubuntu 24.04
+#  Поддерживаемые ОС: Ubuntu 22.04 LTS, 24.04 LTS, 26.04 LTS и новее
 #
 #  Шаги:
 #   1.  Проверка прав root
@@ -46,11 +46,9 @@ log_warn()  { echo -e "${yellow}   ⚠  $*${plain}"; }
 log_error() { echo -e "${red}   ✗  $*${plain}"; }
 log_step()  { echo -e "${cyan}   •  $*${plain}"; }
 
-# section: визуальный разделитель шага с номером и названием.
-# Не используем printf %-Ns для выравнивания: при кириллице (2 байта/символ)
-# ширина считается в БАЙТАХ, а не символах — рамка перестаёт совпадать
-# по краям и "ломается" на длинных названиях. Поэтому строка простая,
-# без зависимости от длины текста.
+# section: заголовок шага.
+# Намеренно без рамок с фиксированной шириной — printf %-Ns считает ширину
+# в байтах, а не символах, и кириллица (2 байта/символ) ломает выравнивание.
 section() {
     CURRENT_STEP=$(( CURRENT_STEP + 1 ))
     CURRENT_STEP_NAME="$*"
@@ -133,8 +131,8 @@ user_in_group() {
 # разрешать только новый порт — пользователь окажется заблокирован.
 #
 # Поэтому при обнаружении ssh.socket мы отключаем socket activation и
-# переходим на классический сервис ssh.service (как в Ubuntu 22.04) —
-# тогда Port из sshd_config становится единственным источником правды.
+# переходим на классический сервис ssh.service — тогда Port из sshd_config
+# становится единственным источником правды.
 restart_ssh() {
     if systemctl is-enabled ssh.socket &>/dev/null; then
         log_info "Обнаружена socket activation (ssh.socket)"
@@ -148,12 +146,11 @@ restart_ssh() {
     fi
 
     log_info "Перезапуск SSH-сервиса..."
-    # enable создаёт автозапуск на будущие перезагрузки. Идемпотентно:
-    # если уже включён — просто ничего не меняет.
+    # enable: добавляет автозапуск. Идемпотентно — если уже включён, просто no-op.
+    # Пробуем оба имени: ssh.service (Ubuntu/Debian) и sshd.service (некоторые дистрибутивы).
     systemctl enable ssh.service 2>/dev/null || systemctl enable sshd.service 2>/dev/null || true
 
-    # restart применяет новый конфиг независимо от текущего состояния сервиса
-    # (даже если он был неактивен — restart его запустит).
+    # restart применяет новый конфиг независимо от текущего состояния сервиса.
     if ! systemctl restart ssh.service 2>/dev/null; then
         systemctl restart sshd.service || die \
             "Не удалось перезапустить SSH-сервис" \
@@ -179,6 +176,14 @@ check_internet() {
     log_ok "Интернет доступен"
 }
 
+# ver_ge: сравнивает версии Ubuntu. Возвращает 0 если $1 >= $2.
+# Используется чтобы не перечислять конкретные версии — скрипт поддерживает
+# 22.04 и все последующие LTS без изменений.
+ver_ge() {
+    # printf '%s\n' расставляет по строкам, sort -V сортирует по версии
+    [ "$(printf '%s\n' "$1" "$2" | sort -V | head -n1)" = "$2" ]
+}
+
 # ============================================================
 #  Управление временными файлами
 # ============================================================
@@ -193,8 +198,8 @@ cleanup_tmpfiles() {
 }
 trap cleanup_tmpfiles EXIT
 
-# tmpfile_remove: немедленно удалить файл и убрать из очереди cleanup.
-# Удаление по точному совпадению индекса (не подстроки) — единственный надёжный способ.
+# tmpfile_remove: немедленно удаляет файл и убирает его из очереди cleanup.
+# Удаляем по точному совпадению индекса (не подстроки).
 tmpfile_remove() {
     local target="$1"
     rm -f "$target"
@@ -226,7 +231,7 @@ section "Определение ОС"
 
 [ -f /etc/os-release ] || die \
     "Файл /etc/os-release не найден — невозможно определить ОС" \
-    "  Поддерживаются только Ubuntu 22.04 и 24.04"
+    "  Поддерживается Ubuntu 22.04 LTS и новее"
 
 # shellcheck source=/dev/null
 . /etc/os-release
@@ -234,13 +239,22 @@ OS_NAME="${NAME:-}"
 OS_VERSION="${VERSION_ID:-}"
 log_step "Обнаружена ОС: ${bold}$OS_NAME $OS_VERSION${plain}"
 
-if [[ "$OS_NAME" == *"Ubuntu"* ]] && [[ "$OS_VERSION" == "22.04" || "$OS_VERSION" == "24.04" ]]; then
-    log_ok "Ubuntu $OS_VERSION поддерживается"
+if [[ "$OS_NAME" == *"Ubuntu"* ]]; then
+    # Поддерживаем Ubuntu 22.04 и все последующие версии.
+    # ver_ge проверяет что версия >= 22.04 без перечисления конкретных релизов —
+    # скрипт будет работать на 24.04, 26.04 и последующих LTS без изменений.
+    if ver_ge "$OS_VERSION" "22.04"; then
+        log_ok "Ubuntu $OS_VERSION — поддерживается"
+    else
+        die "Ubuntu $OS_VERSION не поддерживается" \
+            "  Минимальная поддерживаемая версия: Ubuntu 22.04 LTS
+  Пожалуйста, обновите ОС до Ubuntu 22.04 LTS или новее"
+    fi
 elif [[ "$OS_NAME" == *"Debian"* ]]; then
-    die "Debian не поддерживается. Скрипт тестировался только на Ubuntu 22.04 и 24.04"
+    die "Debian не поддерживается. Скрипт тестировался только на Ubuntu 22.04+"
 else
     die "ОС не поддерживается: $OS_NAME $OS_VERSION" \
-        "  Установите Ubuntu 22.04 или 24.04 и запустите скрипт заново"
+        "  Установите Ubuntu 22.04 LTS или новее и запустите скрипт заново"
 fi
 
 # ============================================================
@@ -285,14 +299,13 @@ else
         "Ошибка при apt-get update" \
         "  1. Проверьте интернет: ping 8.8.8.8
   2. Проверьте sources.list: cat /etc/apt/sources.list
-  3. Исправьте повреждённые пакеты: dpkg --configure -a
-  4. Удалите маркер если он остался: rm -f $UPDATE_MARKER"
+  3. Исправьте повреждённые пакеты: dpkg --configure -a"
 
     log_info "Установка обновлений (это может занять несколько минут)..."
-    # --force-confdef/--force-confold: если обновление пакета (например,
-    # openssh-server) принесёт новый конфиг-файл — dpkg НЕ будет спрашивать
-    # что делать (это могло бы "подвесить" неинтерактивный скрипт), а
-    # автоматически оставит текущую версию файла.
+    # --force-confdef/--force-confold: при обновлении пакета с изменившимся
+    # конфигом (например, openssh-server) dpkg не будет показывать диалог —
+    # это могло бы "подвесить" неинтерактивный скрипт. Автоматически оставляем
+    # текущую версию файла конфигурации.
     apt-get upgrade -y -q \
         -o Dpkg::Options::="--force-confdef" \
         -o Dpkg::Options::="--force-confold" \
@@ -343,8 +356,8 @@ if id "$username" &>/dev/null; then
 else
     useradd -m -s /bin/bash "$username" || die \
         "Не удалось создать пользователя $username" \
-        "  Проверьте вручную: cat /etc/passwd | grep $username
-  Если пользователь повреждён: userdel -r $username"
+        "  Проверьте вручную: getent passwd $username
+  Если запись повреждена: userdel -r $username"
     log_ok "Пользователь $username создан"
     USER_IS_NEW=true
 fi
@@ -392,15 +405,13 @@ touch "$AUTH_KEYS"
 chmod 600 "$AUTH_KEYS"
 chown -R "$username":"$username" "$SSH_DIR"
 
-# Показываем уже добавленные ключи если есть — полезно при повторном запуске
-EXISTING_KEYS=0
+# Показываем уже добавленные ключи — полезно при повторном запуске
 if [[ -s "$AUTH_KEYS" ]]; then
     EXISTING_KEYS=$(ssh-keygen -l -f "$AUTH_KEYS" 2>/dev/null | wc -l || echo 0)
     if (( EXISTING_KEYS > 0 )); then
         log_warn "В authorized_keys уже есть ключей: $EXISTING_KEYS"
-        log_step "Текущие ключи:"
         ssh-keygen -l -f "$AUTH_KEYS" 2>/dev/null | while read -r line; do
-            log_step "  $line"
+            log_step "$line"
         done
     fi
 fi
@@ -410,14 +421,15 @@ log_step "RSA:     ssh-rsa AAAAB3NzaC1yc2E..."
 log_step "ED25519: ssh-ed25519 AAAAC3NzaC1lZDI1N...  (рекомендуется)"
 log_step "ECDSA:   ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTI..."
 
-# Валидация через ssh-keygen — надёжнее regex.
-# Временный файл в _TMPFILES — удалится при любом выходе.
+# Валидация через ssh-keygen — надёжнее regex: проверяет реальную структуру ключа.
+# Временный файл регистрируется в _TMPFILES — удалится при любом выходе из скрипта.
 SSH_KEY_TMP=$(mktemp /tmp/sshkey_validate.XXXXXX)
 _TMPFILES+=("$SSH_KEY_TMP")
 
 validate_ssh_key() {
     local key="$1"
     [[ -z "$key" ]] && return 1
+    # printf надёжнее echo для строк начинающихся с '-'
     printf '%s\n' "$key" > "$SSH_KEY_TMP"
     ssh-keygen -l -f "$SSH_KEY_TMP" &>/dev/null
 }
@@ -426,6 +438,8 @@ ssh_key=''
 while true; do
     read -r -p "  Введите SSH-ключ: " ssh_key
     if validate_ssh_key "$ssh_key"; then
+        # -qxF: совпадение строки целиком (-x), без regex (-F).
+        # Предотвращает дублирование при повторном запуске.
         if grep -qxF "$ssh_key" "$AUTH_KEYS" 2>/dev/null; then
             log_warn "Этот ключ уже есть в authorized_keys — пропускаем"
         else
@@ -455,23 +469,35 @@ MAIN_CONFIG="/etc/ssh/sshd_config"
 CONFIG_DIR="/etc/ssh/sshd_config.d"
 MAIN_CONFIG_BACKUP="${MAIN_CONFIG}.backup.$(date +%Y%m%d_%H%M%S)"
 
-# Показываем текущий порт SSH чтобы пользователь не запутался
-CURRENT_SSH_PORT=$(ss -tlnH "( sport = :22 )" | grep -q . && echo "22" \
-    || grep -E "^Port " "$MAIN_CONFIG" 2>/dev/null | awk '{print $2}' || echo "неизвестен")
+# Определяем текущий SSH-порт: сначала ищем слушающий процесс,
+# затем читаем из конфига. Это работает независимо от того, какой
+# порт был установлен при предыдущем запуске скрипта.
+CURRENT_SSH_PORT="неизвестен"
+# Ищем первый TCP-порт где слушает sshd/ssh (исключая ::1 и 127.x)
+SS_PORT=$(ss -tlnpH | awk '/sshd|ssh/ && !/127\.|::1/ {
+    match($4, /:([0-9]+)$/, m); if (m[1]) { print m[1]; exit }
+}' 2>/dev/null || true)
+if [[ -n "$SS_PORT" ]]; then
+    CURRENT_SSH_PORT="$SS_PORT"
+elif [[ -f "$MAIN_CONFIG" ]]; then
+    CFG_PORT=$(grep -E "^Port " "$MAIN_CONFIG" 2>/dev/null | awk '{print $2}' | head -n1 || true)
+    [[ -n "$CFG_PORT" ]] && CURRENT_SSH_PORT="$CFG_PORT"
+fi
 log_step "Текущий SSH-порт: ${bold}$CURRENT_SSH_PORT${plain}"
-log_step "Подобрать порт: https://www.shodan.io/search/facet?query=ssh&facet=port"
+log_step "Посмотреть какие порты используются в интернете: https://www.shodan.io/search/facet?query=ssh&facet=port"
 
 NEW_PORT=''
 while true; do
     read -r -p "  Введите новый порт SSH (1024–65535): " NEW_PORT
     if [[ "$NEW_PORT" =~ ^[0-9]+$ ]] && (( NEW_PORT >= 1024 && NEW_PORT <= 65535 )); then
-        # Если пользователь оставляет ТЕКУЩИЙ SSH-порт (например, повторный
-        # запуск после ошибки на более позднем шаге) — пропускаем проверку
-        # занятости: порт "занят" самим sshd, и это ожидаемо и нормально.
+        # Если пользователь оставляет ТЕКУЩИЙ SSH-порт (повторный запуск после
+        # ошибки на более позднем шаге) — пропускаем проверку занятости:
+        # порт "занят" самим sshd, и это ожидаемо.
         if [[ "$NEW_PORT" == "$CURRENT_SSH_PORT" ]]; then
-            log_info "Порт $NEW_PORT совпадает с текущим SSH-портом — оставляем без изменений"
+            log_info "Порт $NEW_PORT совпадает с текущим SSH-портом — оставляем"
             break
         fi
+        # Нативный фильтр ss по sport — точное совпадение, без ложных срабатываний
         if ss -tlnH "( sport = :$NEW_PORT )" | grep -q .; then
             OCCUPANT=$(ss -tlnH "( sport = :$NEW_PORT )" | awk '{print $NF}')
             log_error "Порт $NEW_PORT занят: $OCCUPANT — выберите другой"
@@ -601,7 +627,8 @@ validate_ip() {
     return 0
 }
 
-# Сбрасываем правила только если UFW ещё не активен
+# Сбрасываем правила только если UFW ещё не активен —
+# не затираем существующие правила при повторном запуске
 if ! ufw status 2>/dev/null | grep -q "^Status: active"; then
     ufw --force reset
     log_info "Правила UFW сброшены (UFW не был активен)"
@@ -701,10 +728,10 @@ else
 
         chmod 600 "$SWAPFILE"
         mkswap "$SWAPFILE" || die "Ошибка при форматировании swap" "  mkswap $SWAPFILE"
-        swapon "$SWAPFILE" || die "Ошибка при подключении swap" "  swapon $SWAPFILE"
+        swapon  "$SWAPFILE" || die "Ошибка при подключении swap"   "  swapon $SWAPFILE"
 
-        # Добавляем в fstab только если записи ещё нет
-        # "defaults" вместо устаревшего "sw" (BSD-флаг, не нужен в Linux)
+        # Добавляем в fstab только если записи ещё нет.
+        # "defaults" вместо устаревшего BSD-флага "sw"
         if ! grep -qF "$SWAPFILE" /etc/fstab; then
             echo "$SWAPFILE none swap defaults 0 0" >> /etc/fstab
             log_ok "Запись добавлена в /etc/fstab — swap подключится автоматически после перезагрузки"
@@ -712,7 +739,7 @@ else
             log_ok "Запись о swap уже есть в /etc/fstab"
         fi
 
-        # Пересчитываем — не полагаемся на старое значение 0
+        # Пересчитываем — не полагаемся на устаревшее значение 0
         SWAP_TOTAL=$(swapon --show --noheadings 2>/dev/null | wc -l)
         log_ok "Swap $SWAP_SIZE активирован:"
         swapon --show | while read -r line; do log_step "$line"; done
@@ -730,20 +757,18 @@ section "Установка CrowdSec"
 CROWDSEC_ACTIVE=false
 
 log_info "CrowdSec — система обнаружения и блокировки атак (бан-агент + firewall-боунсер)"
+INSTALL_CROWDSEC=false
 if command -v cscli &>/dev/null; then
     log_ok "CrowdSec уже установлен — пропускаем установку"
     INSTALL_CROWDSEC=true
 elif ask_yn "Установить CrowdSec?"; then
     INSTALL_CROWDSEC=true
 else
-    INSTALL_CROWDSEC=false
-    log_warn "Установка CrowdSec пропущена по выбору пользователя"
+    log_warn "Установка CrowdSec пропущена"
 fi
 
 if [[ "$INSTALL_CROWDSEC" == true ]]; then
-    if command -v cscli &>/dev/null; then
-        log_ok "CrowdSec уже установлен — пропускаем"
-    else
+    if ! command -v cscli &>/dev/null; then
         check_internet
 
         # Скачиваем во временный файл — в curl | sh код возврата curl
@@ -751,18 +776,18 @@ if [[ "$INSTALL_CROWDSEC" == true ]]; then
         CROWDSEC_INSTALLER=$(mktemp)
         _TMPFILES+=("$CROWDSEC_INSTALLER")
 
-        log_info "Загрузка установщика CrowdSec..."
+        log_info "Загрузка официального установщика CrowdSec..."
         curl -fsSL https://install.crowdsec.net -o "$CROWDSEC_INSTALLER" || die \
             "Не удалось загрузить установщик CrowdSec" \
             "  Проверьте интернет: ping 8.8.8.8
-  Или установите вручную: https://docs.crowdsec.net/docs/getting_started/install_crowdsec/"
+  Документация: https://docs.crowdsec.net/docs/getting_started/install_crowdsec/"
 
-        log_info "Запуск установщика CrowdSec..."
+        log_info "Запуск установщика (добавляет репозиторий CrowdSec)..."
         sh "$CROWDSEC_INSTALLER" || die \
             "Ошибка установщика CrowdSec" \
-            "  Попробуйте установить вручную:
+            "  Попробуйте добавить репозиторий вручную:
   curl -s https://packagecloud.io/install/repositories/crowdsec/crowdsec/script.deb.sh | bash
-  apt-get install crowdsec"
+  Документация: https://docs.crowdsec.net/docs/getting_started/install_crowdsec/"
 
         log_info "Установка пакета crowdsec..."
         apt-get update -q || die "Ошибка apt-get update" "  apt-get update"
@@ -774,27 +799,44 @@ if [[ "$INSTALL_CROWDSEC" == true ]]; then
         log_ok "CrowdSec установлен"
     fi
 
-    # Запускаем до установки боунсера — боунсер регистрируется через LAPI
+    # Запускаем сервис до установки боунсера — боунсер регистрируется через LAPI
     systemctl enable crowdsec --now || die \
         "Не удалось запустить CrowdSec" \
         "  journalctl -u crowdsec --no-pager -n 30
   systemctl status crowdsec"
     log_ok "Сервис CrowdSec запущен"
 
-    if pkg_installed crowdsec-firewall-bouncer-iptables; then
-        log_ok "crowdsec-firewall-bouncer-iptables уже установлен — пропускаем"
-    else
-        log_info "Установка firewall-боунсера..."
-        apt-get install -y -q crowdsec-firewall-bouncer-iptables || die \
-            "Ошибка при установке crowdsec-firewall-bouncer-iptables" \
-            "  apt-get install -y crowdsec-firewall-bouncer-iptables"
-        log_ok "Firewall-боунсер установлен"
+    # Определяем подходящий пакет firewall-боунсера.
+    # На Ubuntu 26.04+ iptables заменён на nftables как backend — проверяем оба.
+    BOUNCER_PKG=""
+    if apt-cache show crowdsec-firewall-bouncer-nftables &>/dev/null; then
+        BOUNCER_PKG="crowdsec-firewall-bouncer-nftables"
+    elif apt-cache show crowdsec-firewall-bouncer-iptables &>/dev/null; then
+        BOUNCER_PKG="crowdsec-firewall-bouncer-iptables"
     fi
 
-    systemctl enable crowdsec-firewall-bouncer --now || die \
-        "Не удалось запустить crowdsec-firewall-bouncer" \
-        "  journalctl -u crowdsec-firewall-bouncer --no-pager -n 30"
-    log_ok "CrowdSec firewall-bouncer запущен"
+    if [[ -z "$BOUNCER_PKG" ]]; then
+        log_warn "Пакет firewall-боунсера не найден в репозиториях"
+        log_warn "Установите вручную после завершения скрипта:"
+        log_warn "  cscli bouncers list"
+        log_warn "  https://docs.crowdsec.net/docs/bouncers/firewall/"
+    else
+        if pkg_installed "$BOUNCER_PKG"; then
+            log_ok "$BOUNCER_PKG уже установлен — пропускаем"
+        else
+            log_info "Установка firewall-боунсера ($BOUNCER_PKG)..."
+            apt-get install -y -q "$BOUNCER_PKG" || die \
+                "Ошибка при установке $BOUNCER_PKG" \
+                "  apt-get install -y $BOUNCER_PKG"
+            log_ok "Firewall-боунсер установлен: $BOUNCER_PKG"
+        fi
+
+        # Имя юнита совпадает с именем пакета
+        systemctl enable "$BOUNCER_PKG" --now || die \
+            "Не удалось запустить $BOUNCER_PKG" \
+            "  journalctl -u $BOUNCER_PKG --no-pager -n 30"
+        log_ok "CrowdSec firewall-bouncer запущен"
+    fi
 
     CROWDSEC_ACTIVE=true
 fi
@@ -821,8 +863,8 @@ log_ok "20auto-upgrades настроен"
 
 UNATTENDED_CONF="/etc/apt/apt.conf.d/50unattended-upgrades"
 
-# Функция для правки параметра в 50unattended-upgrades:
-# если строка есть (в т.ч. закомментированная) — заменяем; нет — дописываем.
+# set_unattended_param: правит параметр в 50unattended-upgrades.
+# Если строка есть (в т.ч. закомментированная) — заменяем; нет — дописываем в конец.
 set_unattended_param() {
     local pattern="$1"
     local replacement="$2"
@@ -903,7 +945,7 @@ fi
 #  Удаление маркера обновления
 # ============================================================
 # Скрипт успешно завершил все шаги — маркер больше не нужен.
-# При следующем запуске система будет обновлена заново (apt-get upgrade идемпотентен).
+# При следующем запуске apt-get upgrade идемпотентен и просто ничего не сделает.
 if [ -f "$UPDATE_MARKER" ]; then
     rm -f "$UPDATE_MARKER"
     log_ok "Маркер обновления удалён"
@@ -913,16 +955,13 @@ fi
 #  Итоговая сводка
 # ============================================================
 echo
-echo -e "${bold}${green}╔══════════════════════════════════════════════════════╗"
-echo -e "║          ✅  Настройка сервера завершена!           ║"
-echo -e "╚══════════════════════════════════════════════════════╝${plain}"
+echo -e "${bold}${green}  ✅  Настройка сервера завершена!${plain}"
+echo -e "${bold}${green}════════════════════════════════════════${plain}"
 echo
-echo -e "${bold}${yellow}  Параметры подключения:${plain}"
-echo -e "${bold}${cyan}  ┌─────────────────────────────────────────────────────┐${plain}"
-echo -e "${bold}${cyan}  │  ssh $username@<IP-сервера> -p $NEW_PORT${plain}"
-echo -e "${bold}${cyan}  └─────────────────────────────────────────────────────┘${plain}"
+echo -e "${bold}${yellow}  Команда для подключения:${plain}"
+echo -e "${bold}${cyan}  ssh $username@<IP-сервера> -p $NEW_PORT${plain}"
 echo
-echo -e "${yellow}  📋 Итоговые параметры:${plain}"
+echo -e "${yellow}  Итоговые параметры:${plain}"
 echo -e "${blue}     Пользователь:        ${bold}$username${plain}"
 echo -e "${blue}     SSH порт:            ${bold}$NEW_PORT/tcp${plain}"
 if [[ "$UFW_SSH_MODE" == "any" ]]; then
