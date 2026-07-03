@@ -79,11 +79,19 @@ die() {
 # ============================================================
 #  Флаги завершённых шагов
 # ============================================================
-# Каждый шаг после успешного выполнения создаёт флаг в /root/.setup/.
-# При повторном запуске шаги с флагом пропускаются.
-# Флаги удаляются только в самом конце — после полного успешного завершения.
-# Исключения: шаги 1-2 (root/ОС) и 5 (пароль root) — всегда быстрые и безопасные,
-# флаги для них не нужны.
+# Каждый шаг (кроме 1 и 2) после успешного выполнения создаёт флаг в
+# /root/.setup/. При повторном запуске шаги с флагом пропускаются.
+# Флаги удаляются только в самом конце — после полного успешного
+# завершения ВСЕХ шагов.
+#
+# Шаги 1-2 (проверка root, определение ОС) флагов не имеют — они и так
+# выполняются мгновенно и не меняют состояние сервера, повторный прогон
+# ничего не стоит.
+#
+# Если шаг спрашивает что-то у пользователя и результат нужен на более
+# поздних шагах (имя пользователя, SSH-порт, режим UFW и т.д.) — этот
+# результат дополнительно сохраняется в отдельный файл рядом с флагом,
+# чтобы при пропуске шага переменная восстанавливалась, а не терялась.
 SETUP_DIR="/root/.setup"
 mkdir -p "$SETUP_DIR"
 
@@ -96,13 +104,6 @@ mark_done() {
     # Создаёт флаг завершённого шага
     touch "$SETUP_DIR/step_${1}_done"
     log_ok "Шаг $1 отмечен как выполненный"
-}
-
-skip_done() {
-    # Вызывается в начале шага: если флаг есть — пропускаем и выходим из вызывающего контекста
-    # Использование: step_done N && { log_ok "...пропускаем"; return 0; } || true  — внутри функций
-    # Для main-scope используем прямую проверку через step_done
-    true
 }
 
 # ============================================================
@@ -211,9 +212,12 @@ check_internet() {
 # Без ожидания apt-get мгновенно падает с "Could not get lock".
 # Решение: ждём до MAX_WAIT секунд, проверяя лок каждые INTERVAL секунд.
 apt_wait() {
+    # /var/lib/apt/lists/lock держится во время "apt-get update" —
+    # без него гонка с фоновым apt update всё ещё возможна.
     local LOCK_FILES=(
         /var/lib/dpkg/lock-frontend
         /var/lib/dpkg/lock
+        /var/lib/apt/lists/lock
         /var/cache/apt/archives/lock
     )
     local MAX_WAIT=120
@@ -226,7 +230,7 @@ apt_wait() {
         local lock
         for lock in "${LOCK_FILES[@]}"; do
             # fuser возвращает 0 если файл занят каким-либо процессом
-            if [ -f "$lock" ] && fuser "$lock" &>/dev/null 2>&1; then
+            if [ -f "$lock" ] && fuser "$lock" &>/dev/null; then
                 busy=true
                 break
             fi
@@ -417,11 +421,9 @@ fi
 # ============================================================
 section "Обновление системы"
 
-# Шаг 4 использует собственный маркер (UPDATE_MARKER) для идемпотентности,
-# т.к. после обновления может потребоваться перезагрузка — флаг создаётся
-# ДО reboot чтобы при повторном запуске шаг был пропущен.
-UPDATE_MARKER="$SETUP_DIR/step_4_done"
-
+# После apt-get upgrade система может потребовать перезагрузку — флаг
+# шага создаётся ДО reboot (см. mark_done 4 ниже), поэтому при повторном
+# запуске после перезагрузки шаг 4 будет корректно пропущен.
 if step_done 4; then
     log_ok "Шаг уже выполнен — пропускаем"
 else
@@ -639,15 +641,19 @@ section "Настройка SSH-демона"
 
 MAIN_CONFIG="/etc/ssh/sshd_config"
 CONFIG_DIR="/etc/ssh/sshd_config.d"
-MAIN_CONFIG_BACKUP="${MAIN_CONFIG}.backup.$(date +%Y%m%d_%H%M%S)"
 
-# Имя пользователя нужно для предупреждения "как подключиться"
-# Порт сохраняем в файл — нужен в шаге 10 (UFW) и в сводке
+# Порт и путь к бэкапу сохраняем в файлы — нужны в шаге 10 (UFW) и в
+# итоговой сводке. Без этого при пропуске уже выполненного шага 9
+# переменные NEW_PORT/MAIN_CONFIG_BACKUP останутся пустыми или (для
+# бэкапа) перезапишутся новым несуществующим путём с текущей меткой
+# времени, и сводка в конце покажет неверные данные.
 SSH_PORT_FILE="$SETUP_DIR/step_9_port"
+BACKUP_PATH_FILE="$SETUP_DIR/step_9_backup_path"
 
 if step_done 9; then
     log_ok "Шаг уже выполнен — пропускаем"
     NEW_PORT=$(cat "$SSH_PORT_FILE" 2>/dev/null || true)
+    MAIN_CONFIG_BACKUP=$(cat "$BACKUP_PATH_FILE" 2>/dev/null || true)
     if [[ -z "$NEW_PORT" ]]; then
         die \
             "Шаг помечен как выполненный, но файл с портом не найден" \
@@ -655,6 +661,7 @@ if step_done 9; then
     fi
     log_step "SSH-порт из предыдущего запуска: ${bold}$NEW_PORT${plain}"
 else
+    MAIN_CONFIG_BACKUP="${MAIN_CONFIG}.backup.$(date +%Y%m%d_%H%M%S)"
     # Определяем текущий SSH-порт: сначала ищем слушающий процесс,
     # затем читаем из конфига. Работает независимо от того, какой порт
     # был установлен при предыдущем запуске скрипта.
@@ -675,7 +682,11 @@ else
     NEW_PORT=''
     while true; do
         read -r -p "  Введите новый порт SSH (1024–65535): " NEW_PORT
-        if [[ "$NEW_PORT" =~ ^[0-9]+$ ]] && (( NEW_PORT >= 1024 && NEW_PORT <= 65535 )); then
+        # 10#$NEW_PORT форсирует десятичную базу: без этого "08080" (ведущий
+        # ноль + цифра 8/9) сломает арифметику bash ошибкой "value too great
+        # for base", т.к. bash по умолчанию трактует 0-префикс как восьмеричный.
+        if [[ "$NEW_PORT" =~ ^[0-9]+$ ]] \
+            && (( 10#$NEW_PORT >= 1024 && 10#$NEW_PORT <= 65535 )); then
             # Если пользователь оставляет ТЕКУЩИЙ SSH-порт (повторный запуск после
             # ошибки на более позднем шаге) — пропускаем проверку занятости:
             # порт "занят" самим sshd, и это ожидаемо.
@@ -775,6 +786,7 @@ else
 
     # Сохраняем порт для использования на шаге 10 (UFW) и в сводке
     echo "$NEW_PORT" > "$SSH_PORT_FILE"
+    echo "$MAIN_CONFIG_BACKUP" > "$BACKUP_PATH_FILE"
     mark_done 9
 fi
 
@@ -818,7 +830,9 @@ else
         read -ra octets <<< "$ip"
         local octet
         for octet in "${octets[@]}"; do
-            (( octet > 255 )) && return 1
+            # 10#$octet форсирует десятичную базу — иначе октет с ведущим
+            # нулём и цифрой 8/9 (например "008") сломает арифметику bash
+            (( 10#$octet > 255 )) && return 1
         done
 
         if [[ "$has_mask" == true ]]; then
@@ -883,7 +897,14 @@ section "Настройка swap"
 
 if step_done 11; then
     log_ok "Шаг уже выполнен — пропускаем"
-    SWAP_ACTIVE=true
+    # Проверяем реальное состояние, а не считаем true "на слово": если в
+    # предыдущем запуске пользователь отказался создавать swap, флаг шага
+    # всё равно был установлен, и реальный swap мог так и не появиться.
+    if (( $(swapon --show --noheadings 2>/dev/null | wc -l) > 0 )); then
+        SWAP_ACTIVE=true
+    else
+        SWAP_ACTIVE=false
+    fi
 else
     SWAP_TOTAL=$(swapon --show --noheadings 2>/dev/null | wc -l)
     SWAP_ACTIVE=false
@@ -914,12 +935,14 @@ else
                 rm -f "$SWAPFILE"
             fi
 
-            # Конвертируем в мегабайты для dd (bs=1M универсально для всех версий dd)
+            # Конвертируем в мегабайты для dd (bs=1M универсально для всех версий dd).
+            # 10#$swap_num форсирует десятичную базу — иначе размер с ведущим
+            # нулём (например "008G") сломает арифметику bash.
             swap_num="${SWAP_SIZE%[MGmg]}"
             swap_unit="${SWAP_SIZE: -1}"
-            swap_mb="$swap_num"
+            swap_mb=$(( 10#$swap_num ))
             if [[ "${swap_unit,,}" == "g" ]]; then
-                swap_mb=$(( swap_num * 1024 ))
+                swap_mb=$(( 10#$swap_num * 1024 ))
             fi
 
             # fallocate быстрее dd, но не работает на btrfs/tmpfs/NFS
@@ -968,7 +991,14 @@ CROWDSEC_ACTIVE=false
 
 if step_done 12; then
     log_ok "Шаг уже выполнен — пропускаем"
-    CROWDSEC_ACTIVE=true
+    # Проверяем реальное состояние: если в предыдущем запуске пользователь
+    # отказался от установки CrowdSec, флаг шага всё равно был установлен,
+    # но cscli в системе так и не появится.
+    if command -v cscli &>/dev/null; then
+        CROWDSEC_ACTIVE=true
+    else
+        CROWDSEC_ACTIVE=false
+    fi
 else
     log_info "CrowdSec — система обнаружения и блокировки атак (бан-агент + firewall-боунсер)"
     INSTALL_CROWDSEC=false
@@ -1029,6 +1059,13 @@ else
             BOUNCER_PKG="crowdsec-firewall-bouncer-iptables"
         fi
 
+        # ВАЖНО: имя systemd-юнита НЕ совпадает с именем пакета. Оба варианта
+        # пакета (iptables и nftables — они конфликтуют между собой и
+        # устанавливаются как взаимоисключающие) ставят один и тот же юнит
+        # "crowdsec-firewall-bouncer.service" без суффикса. Обращение к
+        # systemctl по имени пакета привело бы к ошибке "unit not found".
+        BOUNCER_UNIT="crowdsec-firewall-bouncer"
+
         if [[ -z "$BOUNCER_PKG" ]]; then
             log_warn "Пакет firewall-боунсера не найден в репозиториях"
             log_warn "Установите вручную после завершения скрипта:"
@@ -1045,11 +1082,12 @@ else
                 log_ok "Firewall-боунсер установлен: $BOUNCER_PKG"
             fi
 
-            systemctl enable "$BOUNCER_PKG" --now || die \
-                "Не удалось запустить $BOUNCER_PKG" \
-                "  journalctl -u $BOUNCER_PKG --no-pager -n 30"
+            systemctl enable "$BOUNCER_UNIT" --now || die \
+                "Не удалось запустить $BOUNCER_UNIT" \
+                "  journalctl -u $BOUNCER_UNIT --no-pager -n 30"
             log_ok "CrowdSec firewall-bouncer запущен"
         fi
+
 
         CROWDSEC_ACTIVE=true
     fi
@@ -1135,7 +1173,14 @@ SUDOERS_FILE="/etc/sudoers.d/$username"
 
 if step_done 14; then
     log_ok "Шаг уже выполнен — пропускаем"
-    NOPASSWD_ACTIVE=true
+    # Проверяем реальное состояние: если в предыдущем запуске пользователь
+    # отказался включать sudo без пароля, флаг шага всё равно был
+    # установлен, но файла в sudoers.d так и не появится.
+    if [ -f "$SUDOERS_FILE" ]; then
+        NOPASSWD_ACTIVE=true
+    else
+        NOPASSWD_ACTIVE=false
+    fi
 else
     log_warn "Некоторые сервисы (например, AmneziaVPN) требуют sudo без пароля"
     log_warn "при подключении по SSH-ключу."
